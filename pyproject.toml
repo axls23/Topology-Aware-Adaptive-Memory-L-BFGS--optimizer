@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ta-lbfgs"
+version = "0.1.0"
+description = "Topology-Aware Adaptive-Memory L-BFGS for Bilevel Hyperparameter Optimization"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "ta-LBFGS Team"}
+]
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+    "rich>=13.0.0",
+    "plotly>=5.15.0",
+    "matplotlib>=3.7.0",
+    "scipy>=1.10.0",
+    "optuna>=3.4.0",
+    "openai>=1.0.0",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+llm = [
+    "transformers>=4.36.0",
+    "peft>=0.7.0",
+    "datasets>=2.16.0",
+]
+dev = [
+    "pytest>=7.4.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["ta_lbfgs*"]

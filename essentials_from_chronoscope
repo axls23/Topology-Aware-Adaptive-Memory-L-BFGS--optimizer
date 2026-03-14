@@ -1,0 +1,357 @@
+# Chronoscope → Layerwise ta-LBFGS: Reusable Code Analysis
+
+**Codebase Scanned:** `c:\dev\explainablity\chronoscope\` (9 modules) + `experiments\` (7 scripts)
+**Target Project:** Layerwise Topology-Aware Adaptive-Memory L-BFGS for LoRA Hyperparameter Optimization
+
+---
+
+## 1. Reusable As-Is
+
+These components can be dropped directly into the ta-LBFGS architecture with minimal or zero modification:
+
+### A. SVD / Condition Number / Eigenvalue Estimation
+| Source | Function/Class | Reuse Target |
+|--------|---------------|-------------|
+| [observer.py](file:///c:/dev/explainablity/chronoscope/observer.py#L31-L78) | `SignalObserver.svd_compress()` | **Block-diagonal Hessian condition number ($\kappa_l$)**. Already does `np.linalg.svd()` with NaN sanitization, zero-variance column filtering, and singular value extraction. Singular values → condition number via `S[0]/S[-1]`. |
+| [observer.py](file:///c:/dev/explainablity/chronoscope/observer.py#L281-L332) | `SignalObserver.calculate_trajectory_dynamics()` | **Gradient norm tracking / moving averages**. Computes L2 velocity (`np.linalg.norm(np.diff(...))`), acceleration, and Hurst exponent. Can track loss trajectory dynamics directly. |
+
+### B. Rich CLI Dashboard Infrastructure
+| Source | Function/Class | Reuse Target |
+|--------|---------------|-------------|
+| [exp4_live_dashboard.py](file:///c:/dev/explainablity/experiments/exp4_live_dashboard.py#L15-L20) | `Live`, `Layout`, `Panel`, `Text`, `Group`, `Align` imports | **CLI Dashboard skeleton** — exact Rich widget stack needed for layerwise topology metrics. |
+| [exp4_live_dashboard.py](file:///c:/dev/explainablity/experiments/exp4_live_dashboard.py#L31-L46) | `generate_sparkline()` | **Inline sparkline visualizer** for per-layer $\kappa$, memory size $m_l$, or secant condition in the terminal. |
+| [exp4_live_dashboard.py](file:///c:/dev/explainablity/experiments/exp4_live_dashboard.py#L58-L79) | `Layout` 3-pane setup | **Dashboard layout pattern**: Header / Main (split text + telemetry) / Footer logs — directly maps to optimizer dashboard. |
+| [exp2_live_heatmap.py](file:///c:/dev/explainablity/experiments/exp2_live_heatmap.py#L35-L65) | `create_heatmap_table()` | **Rich Table with color-coded cells** — reusable for layerwise per-iteration metric tables. |
+| [models.py](file:///c:/dev/explainablity/chronoscope/models.py#L97-L125) | `list_hookable_layers()` | Rich Table rendering for model architecture inspection. |
+
+### C. Topological Heuristics
+| Source | Function/Class | Reuse Target |
+|--------|---------------|-------------|
+| [observer.py](file:///c:/dev/explainablity/chronoscope/observer.py#L338-L413) | `SignalObserver.incremental_analysis()` | **Fast Euler Characteristic ($\chi = V - E$)** as a topological proxy. Already computes pairwise L2 distances, builds adjacency matrix via threshold, and detects structural anomalies. Can repurpose for saddle-point/plateau detection. |
+| [analyzer.py](file:///c:/dev/explainablity/chronoscope/analyzer.py#L140-L153) | `CausalAnalyzer._trajectory_divergence()` | **Quick L2 divergence metric** between tensor trajectories — useful for measuring optimizer step divergence. |
+
+---
+
+## 2. Requires Modification
+
+These exist in the codebase but need adaptation for the bilevel optimization context:
+
+### A. Layer-by-Layer Parameter Isolation (Hook Infrastructure)
+| Source | What Exists | Modification Needed |
+|--------|------------|-------------------|
+| [interceptor.py](file:///c:/dev/explainablity/chronoscope/interceptor.py#L52-L70) | `ChronoscopeInterceptor._make_hook()` — PyTorch `register_forward_hook` that captures hidden states per-layer during forward pass | **Rewrite from forward hooks → parameter iterators**. Current hooks capture *activations*; you need to iterate over *named_parameters* per transformer block, isolating LoRA `lora_A`/`lora_B` weights. The hook registration pattern (`named_modules()` walk + pattern matching via `target_layers` config) is directly reusable. |
+| [interceptor.py](file:///c:/dev/explainablity/chronoscope/interceptor.py#L121-L143) | `_register_hooks()` — Module tree walker with configurable layer name patterns | Adapt the `any(target in name for target in self.config.target_layers)` pattern match to filter LoRA adapter modules specifically (e.g., `"lora_A"`, `"lora_B"` patterns). |
+| [interceptor.py](file:///c:/dev/explainablity/chronoscope/interceptor.py#L38-L44) | `_activations` / `_head_metrics` dict keyed by layer name | **Rename dictionaries** to store per-layer L-BFGS state: `{layer_name: {s_history: [], y_history: [], m_l: int, kappa: float}}`. The per-layer dict-of-lists pattern is identical. |
+
+### B. Topology & Anomaly Detection for Saddle-Point Evasion
+| Source | What Exists | Modification Needed |
+|--------|------------|-------------------|
+| [analyzer.py](file:///c:/dev/explainablity/chronoscope/analyzer.py#L273-L331) | `CausalAnalyzer.topological_analysis()` — Persistent Homology via Ripser | Currently runs on SVD-compressed activation trajectories. Modify to run on gradient vector sequences to detect non-convex plateaus. The Betti number computation and persistence statistics extraction are directly reusable. |
+| [observer.py](file:///c:/dev/explainablity/chronoscope/observer.py#L396-L402) | Anomaly detection via `chi_delta >= 2 or var_delta > 1.5` | Replace the Euler-characteristic anomaly trigger with the **secant condition check** ($y_k^T s_k \le 0$). The stateful tracking pattern (`self._prev_chi`, `self._prev_var`) maps to tracking previous curvature pair status. |
+
+### C. 3D Trajectory Visualization → Optimization Landscape
+| Source | What Exists | Modification Needed |
+|--------|------------|-------------------|
+| [synthesizer.py](file:///c:/dev/explainablity/chronoscope/synthesizer.py#L194-L280) | `ReportSynthesizer._export_interactive_3d()` — Plotly 3D trajectory with windowed segments | Currently visualizes hidden state PCA trajectories. **Repurpose for optimizer trajectory visualization**: plot the 3 principal components of the hyperparameter search path, with windows showing per-epoch segments. Color by loss value instead of token index. The windowed sub-trace overlay pattern is valuable for showing convergence behavior per-layer. |
+| [synthesizer.py](file:///c:/dev/explainablity/chronoscope/synthesizer.py#L148-L170) | `_plot_dynamics()` — velocity/acceleration curves with annotated peaks | Modify to plot **hypergradient magnitude** (velocity) and **curvature estimate change** (acceleration) across outer-loop iterations. The peak annotation logic (`_trajectory_divergence` → annotated scatter point) maps to marking saddle-point evasion events. |
+
+### D. Config & Graph Orchestration
+| Source | What Exists | Modification Needed |
+|--------|------------|-------------------|
+| [config.py](file:///c:/dev/explainablity/chronoscope/config.py) | `ChronoscopeConfig` dataclass with typed fields, dtype mapping, defaults | **Template pattern**. Replace fields: `svd_components` → `lbfgs_memory_base`, `dtw_radius` → `secant_threshold`, `tda_window_size` → `hessian_window_size`. The `get_torch_dtype()` helper and dataclass structure are reusable. |
+| [graph.py](file:///c:/dev/explainablity/chronoscope/graph.py#L72-L139) | `EagerGraph` — node-based execution engine with conditional routing | Adapt for bilevel optimization loop orchestration: nodes = `{inner_train, compute_hypergradient, lbfgs_step, evaluate}`. The `add_conditional_edge()` mechanism maps to early stopping or saddle-point branching. |
+
+### E. VRAM-Aware Execution
+| Source | What Exists | Modification Needed |
+|--------|------------|-------------------|
+| [adaptive_airllm.py](file:///c:/dev/explainablity/chronoscope/adaptive_airllm.py#L28-L37) | `get_free_vram_bytes()`, `get_total_vram_bytes()` | **Directly reusable** for adaptive memory scaling. Use free VRAM to dynamically cap L-BFGS history size $m_l$ when GPU memory is constrained. |
+| [adaptive_airllm.py](file:///c:/dev/explainablity/chronoscope/adaptive_airllm.py#L133-L146) | `_compute_chunk_size()` | Adapt the `usable_memory // per_item_cost` formula for computing max L-BFGS history entries per layer based on available memory. |
+| [adaptive_airllm.py](file:///c:/dev/explainablity/chronoscope/adaptive_airllm.py#L263-L279) | OOM-safe fallback (halve chunk size on `torch.cuda.OutOfMemoryError`) | **Reuse pattern** for graceful degradation of L-BFGS memory window when VRAM is exhausted during inner-loop training. |
+
+---
+
+## 3. Completely Missing
+
+These core project objectives have **zero boilerplate** in the current codebase:
+
+| Missing Component | Description | Priority |
+|---|---|---|
+| **L-BFGS Two-Loop Recursion** | The core algorithm: $H_k^0$, the recursive computation of $\alpha_i$, $\beta_i$ using stored $s_k$, $y_k$ vectors. No optimization algorithm implementation exists. | 🔴 Critical |
+| **L-BFGS History Buffer ($s$/$y$ vectors)** | Circular buffer or deque for curvature pairs with per-layer sizing. No buffer management code exists. | 🔴 Critical |
+| **Sherman-Morrison / BFGS Update** | No matrix update formulas (rank-1 or rank-2) exist anywhere. | 🔴 Critical |
+| **Implicit Function Theorem (IFT)** | No hypergradient computation via $\frac{d\lambda}{d\theta} = -H^{-1} \nabla_\theta f$. No bilevel optimization. | 🔴 Critical |
+| **Conjugate Gradient (CG) Solver** | No iterative solver for the IFT linear system $H v = g$. | 🔴 Critical |
+| **Neumann Series Approximation** | No truncated series $\sum_{i=0}^{K} (I - H)^i g$ for approximate inverse-Hessian-vector products. | 🔴 Critical |
+| **Jacobian-Vector Product (JVP)** | No `torch.autograd.functional.jvp` or manual JVP implementation. | 🔴 Critical |
+| **Hessian-Vector Product (HVP)** | No `torch.autograd.functional.hvp` or double-backward HVP. | 🔴 Critical |
+| **LoRA Adapter Parameter Isolation** | No code aware of `lora_A`, `lora_B` weight structure or PEFT library integration. | 🔴 Critical |
+| **Bilevel Optimization Loop** | No outer-loop / inner-loop training structure. The existing `EagerGraph` could scaffold this but the optimization logic is absent. | 🔴 Critical |
+| **Hyperparameter-in-Computational-Graph** | No mechanism for making learning rate or weight decay differentiable tensors (i.e., `lr = nn.Parameter(...)` with gradient tracking). | 🟡 High |
+| **Adaptive Memory Sizing ($m_l$)** | No dynamic scaling of history window based on condition number. The logic to compute $\kappa$ exists via SVD, but the mapping $\kappa \rightarrow m_l$ does not. | 🟡 High |
+| **Secant Condition Check ($y_k^T s_k \le 0$)** | No curvature pair validation or skip logic. The topology anomaly detector is a structural analog but not mathematically equivalent. | 🟡 High |
+| **Orthogonal Perturbation Injection** | No saddle-point evasion mechanism (e.g., random orthogonal vector generation, QR decomposition for perturbation). | 🟡 High |
+
+---
+
+## 4. Code Extraction: Critical Reusable Components
+
+### 4.1 SVD Compression → Condition Number Estimator
+
+From [observer.py:31-78](file:///c:/dev/explainablity/chronoscope/observer.py#L31-L78):
+
+```python
+def estimate_layer_condition_number(layer_grad_matrix: torch.Tensor, 
+                                      n_components: int = 8) -> float:
+    """
+    Estimate condition number of a layer's gradient/Hessian approximation
+    via SVD. Reuses Chronoscope's sanitization and SVD pipeline.
+    
+    Args:
+        layer_grad_matrix: [params, features] gradient outer product or Hessian block
+        n_components: Number of singular values to retain
+    
+    Returns:
+        Condition number κ = σ_max / σ_min
+    """
+    X = layer_grad_matrix.detach().cpu().numpy()
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    active_cols = np.where(X.std(axis=0) > 1e-6)[0]
+    if len(active_cols) == 0:
+        return 1.0  # Perfectly conditioned (degenerate)
+    
+    X_active = X[:, active_cols]
+    X_centered = X_active - X_active.mean(axis=0)
+    
+    try:
+        _, S, _ = np.linalg.svd(X_centered, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return 1.0
+    
+    k = min(n_components, len(S))
+    S_top = S[:k]
+    sigma_min = S_top[-1] if S_top[-1] > 1e-12 else 1e-12
+    kappa = float(S_top[0] / sigma_min)
+    
+    return kappa
+```
+
+### 4.2 Rich Live Dashboard Template for Layerwise Metrics
+
+From [exp4_live_dashboard.py](file:///c:/dev/explainablity/experiments/exp4_live_dashboard.py):
+
+```python
+from rich.live import Live
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.text import Text
+from rich.table import Table
+from rich.console import Group
+from rich.align import Align
+
+def generate_sparkline(values, max_points=30):
+    """Generate a unicode sparkline for a list of values."""
+    if not values: return ""
+    values = values[-max_points:]
+    v_min, v_max = min(values), max(values)
+    if v_max == v_min: return "▃" * len(values)
+    bars = [' ', '▂', '▃', '▄', '▅', '▆', '▇', '█']
+    return "".join(bars[int((v - v_min)/(v_max - v_min + 1e-9)*7)] for v in values)
+
+def build_optimizer_dashboard():
+    """Create the Rich layout for ta-LBFGS monitoring."""
+    layout = Layout()
+    layout.split_column(
+        Layout(name="header", size=3),
+        Layout(name="main"),
+        Layout(name="footer", size=8)
+    )
+    layout["main"].split_row(
+        Layout(name="layer_metrics", ratio=2),  # layerwise κ, m_l, grad norms
+        Layout(name="optimizer_state", ratio=1)  # outer loop progress, loss
+    )
+    
+    layout["header"].update(Panel(
+        Align.center("[bold cyan]ta-LBFGS Optimizer | Layerwise Topology Dashboard[/]"),
+        style="white on blue"
+    ))
+    return layout
+
+def create_layer_metrics_table(layer_data: dict):
+    """Render per-layer optimizer state as a Rich table."""
+    table = Table(title="[bold cyan]Layerwise Optimizer State[/]", border_style="dim")
+    table.add_column("Layer", style="cyan", width=20)
+    table.add_column("κ", justify="right")
+    table.add_column("m_l", justify="right")
+    table.add_column("‖∇‖", justify="right")
+    table.add_column("y^Ts", justify="right")
+    table.add_column("Sparkline", width=15)
+    
+    for name, data in layer_data.items():
+        kappa_color = "red" if data["kappa"] > 100 else "yellow" if data["kappa"] > 10 else "green"
+        secant_color = "red" if data["secant"] <= 0 else "green"
+        table.add_row(
+            name,
+            f"[{kappa_color}]{data['kappa']:.1f}[/]",
+            str(data["memory_size"]),
+            f"{data['grad_norm']:.4f}",
+            f"[{secant_color}]{data['secant']:.4f}[/]",
+            generate_sparkline(data.get("kappa_history", []))
+        )
+    return table
+```
+
+### 4.3 3D Trajectory → Optimizer Path Visualization
+
+From [synthesizer.py:194-280](file:///c:/dev/explainablity/chronoscope/synthesizer.py#L194-L280) — the Plotly 3D export can visualize the optimizer's hyperparameter search trajectory:
+
+```python
+def export_optimizer_trajectory_3d(
+    hyperparameter_history: np.ndarray,  # [iterations, n_hyperparams]
+    loss_history: np.ndarray,            # [iterations]
+    output_path: str,
+    n_components: int = 3
+):
+    """
+    Adapted from Chronoscope's _export_interactive_3d().
+    Visualizes hyperparameter optimization trajectory in 3D PCA space.
+    Color-codes by loss value for convergence insight.
+    """
+    import plotly.graph_objects as go
+    
+    # SVD compress to 3 dims if needed
+    if hyperparameter_history.shape[1] > 3:
+        centered = hyperparameter_history - hyperparameter_history.mean(axis=0)
+        U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+        coords = U[:, :3] * S[:3]
+    else:
+        coords = hyperparameter_history[:, :3]
+    
+    fig = go.Figure()
+    fig.add_trace(go.Scatter3d(
+        x=coords[:, 0], y=coords[:, 1], z=coords[:, 2],
+        mode='lines+markers',
+        text=[f"Iter {i}, Loss: {loss_history[i]:.4f}" for i in range(len(loss_history))],
+        hoverinfo='text',
+        marker=dict(
+            size=4,
+            color=loss_history,
+            colorscale='RdYlGn_r',
+            colorbar=dict(title="Loss"),
+            opacity=0.8
+        ),
+        line=dict(color='rgba(100,100,255,0.5)', width=2),
+        name='Optimization Trajectory'
+    ))
+    
+    fig.update_layout(
+        title="ta-LBFGS Hyperparameter Search Trajectory (PCA-3D)",
+        scene=dict(
+            xaxis_title='PC0', yaxis_title='PC1', zaxis_title='PC2',
+            aspectmode='cube'
+        )
+    )
+    fig.write_html(output_path)
+```
+
+### 4.4 Euler Characteristic → Saddle-Point Proxy
+
+From [observer.py:338-413](file:///c:/dev/explainablity/chronoscope/observer.py#L338-L413) — the incremental topology analysis can serve as a fast proxy for detecting loss landscape structural changes:
+
+```python
+def detect_saddle_point_topology(
+    recent_gradients: torch.Tensor,  # [window_size, param_dim] 
+    distance_threshold: float = 0.5,
+    prev_chi: int = None
+) -> dict:
+    """
+    Adapted from Chronoscope's incremental_analysis().
+    Uses Euler Characteristic as a fast topological proxy to detect
+    non-convex regions (saddle points / plateaus) in gradient space.
+    """
+    n = recent_gradients.shape[0]
+    grads_np = recent_gradients.float().numpy()
+    
+    # Pairwise L2 distances
+    diffs = grads_np[:, np.newaxis, :] - grads_np[np.newaxis, :, :]
+    distances = np.linalg.norm(diffs, axis=-1)
+    
+    max_dist = distances.max()
+    if max_dist > 0:
+        distances = distances / max_dist
+    
+    adjacency = (distances < distance_threshold).astype(int)
+    V = n
+    E = (np.sum(adjacency) - V) // 2
+    chi = V - E
+    
+    anomaly = False
+    if prev_chi is not None:
+        chi_delta = abs(chi - prev_chi)
+        if chi_delta >= 2:  # Structural break in gradient manifold
+            anomaly = True
+    
+    return {
+        "euler_characteristic": int(chi),
+        "topology_break_detected": anomaly,
+        "should_perturb": anomaly  # Trigger orthogonal perturbation
+    }
+```
+
+### 4.5 Layer Iterator Pattern
+
+From [interceptor.py:121-143](file:///c:/dev/explainablity/chronoscope/interceptor.py#L121-L143):
+
+```python
+def iterate_lora_layers(model, target_patterns=["lora_A", "lora_B"]):
+    """
+    Adapted from Chronoscope's _register_hooks() module walker.
+    Yields (layer_name, parameter_dict) for each LoRA adapter layer.
+    """
+    target_root = model.model if hasattr(model, 'model') else model
+    
+    layers = {}
+    for name, param in target_root.named_parameters():
+        if any(target in name for target in target_patterns):
+            # Group by parent transformer block
+            # e.g. "layers.0.self_attn.lora_A" → block_name = "layers.0"
+            parts = name.split(".")
+            block_idx = None
+            for i, p in enumerate(parts):
+                if p.isdigit():
+                    block_idx = i
+                    break
+            
+            if block_idx is not None:
+                block_name = ".".join(parts[:block_idx+1])
+                layers.setdefault(block_name, {})[name] = param
+    
+    for block_name in sorted(layers.keys(), 
+                              key=lambda n: int(n.split(".")[-1])):
+        yield block_name, layers[block_name]
+```
+
+---
+
+## 5. Summary Matrix
+
+| Functional Block | As-Is | Modify | Missing |
+|---|:---:|:---:|:---:|
+| L-BFGS (two-loop, history, Sherman-Morrison) | ❌ | ❌ | ✅ |
+| IFT / CG / Neumann | ❌ | ❌ | ✅ |
+| JVP / HVP (autodiff) | ❌ | ❌ | ✅ |
+| SVD / Condition Number | ✅ | — | — |
+| Gradient Norm / Moving Averages | ✅ | — | — |
+| Layer-by-Layer Hooks/Iterators | — | ✅ | — |
+| LoRA-Specific Parameter Access | ❌ | ❌ | ✅ |
+| Differentiable Hyperparameters | ❌ | ❌ | ✅ |
+| Topology Heuristics (Euler χ, TDA) | ✅ | — | — |
+| Saddle-Point Evasion | — | ✅ | Partial |
+| Rich CLI Dashboard | ✅ | — | — |
+| 3D Trajectory Viz | — | ✅ | — |
+| VRAM-Aware Memory Scaling | — | ✅ | — |
+| Bilevel Optimization Loop | — | ✅ (EagerGraph) | ✅ |
+| Adaptive Memory $m_l$ | — | — | ✅ |
+| Secant Condition Validation | — | — | ✅ |
+
+> **Verdict**: ~30% of the infrastructure is reusable (Rich dashboard, SVD/topology, hook patterns, VRAM scaling). The core optimization engine (L-BFGS, IFT, CG, HVP, bilevel loop) is **100% greenfield** and must be written from scratch.

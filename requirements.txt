@@ -1,0 +1,24 @@
+# Core
+torch>=2.0.0
+numpy>=1.24.0
+
+# Visualization
+rich>=13.0.0
+plotly>=5.15.0
+matplotlib>=3.7.0
+
+# Optimization Baselines
+scipy>=1.10.0
+optuna>=3.4.0
+
+# Inference (API client for vLLM in WSL)
+openai>=1.0.0
+httpx>=0.25.0
+
+# LLM / PEFT (for future LLM integration)
+transformers>=4.36.0
+peft>=0.7.0
+datasets>=2.16.0
+
+# Testing
+pytest>=7.4.0

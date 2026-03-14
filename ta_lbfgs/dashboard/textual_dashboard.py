@@ -29,36 +29,22 @@ class BrailleCanvas:
             self.grid[y, x] = True
 
     def render(self) -> str:
-        # Optimized vectorized Braille rendering
-        h, w = self.height, self.width
-        # Check if grid matches expectations
-        if self.grid.shape[0] < h * 4 or self.grid.shape[1] < w * 2:
-            return ""
-        
-        # Reshape into blocks of 4x2
-        # We take a slice to ensure it's exactly the size we expect
-        blocks = self.grid[:h*4, :w*2].reshape(h, 4, w, 2).transpose(0, 2, 1, 3)
-        
-        # Braille dot mapping:
-        # 1 4
-        # 2 5
-        # 3 6
-        # 7 8
-        weights = np.array([
-            [0x01, 0x08],
-            [0x02, 0x10],
-            [0x04, 0x20],
-            [0x40, 0x80]
-        ], dtype=np.uint8)
-        
-        # Compute Braille values
-        vals = np.sum(blocks * weights, axis=(2, 3))
-        
-        # Convert to characters
-        # Vectorized chr() isn't standard in numpy, but we can do it with a list comp or frompyfunc
-        # Even a list comp over rows is much faster than per-pixel
-        lines = ["".join(chr(0x2800 + v) for v in row) for row in vals]
-        return "\n".join(lines)
+        output = []
+        for row in range(0, self.height * 4, 4):
+            line = []
+            for col in range(0, self.width * 2, 2):
+                val = 0
+                if self.grid[row, col]:     val |= 0x01
+                if self.grid[row+1, col]:   val |= 0x02
+                if self.grid[row+2, col]:   val |= 0x04
+                if self.grid[row, col+1]:   val |= 0x08
+                if self.grid[row+1, col+1]: val |= 0x10
+                if self.grid[row+2, col+1]: val |= 0x20
+                if self.grid[row+3, col]:   val |= 0x40
+                if self.grid[row+3, col+1]: val |= 0x80
+                line.append(chr(0x2800 + val))
+            output.append("".join(line))
+        return "\n".join(output)
 
 
 class Trajectory3D(Static):
@@ -240,15 +226,8 @@ class TextualDashboard(App):
         self.query_one(DataTable).add_columns("Layer", "κ", "m_l", "y^Ts", "Status", "History")
 
     def call_from_thread(self, fn, *args, **kwargs):
-        """Thread-safe call to a dashboard method using Textual's built-in mechanism."""
-        # Fix: call_next_tick is NOT thread-safe for the initial call from a background thread.
-        # We must use App.call_from_thread (which handles the thread-safe signal logic).
-        # We use super() to ensure we call the built-in Textual implementation, not this shadow.
-        try:
-            super().call_from_thread(fn, *args, **kwargs)
-        except Exception:
-            # Fallback for older Textual versions if necessary
-            self.call_next_tick(fn, *args, **kwargs)
+        """Thread-safe call to a dashboard method."""
+        self.call_next_tick(fn, *args, **kwargs)
 
     def update_data(
         self,
@@ -269,25 +248,14 @@ class TextualDashboard(App):
             viz.mesh = mesh
         
         table = self.query_one(DataTable)
-        # Attempt to update in-place to reduce flickering/blockage
-        if table.row_count == len(layer_data):
-            for i, (name, data) in enumerate(layer_data.items()):
-                kappa, secant = data.get("kappa", 1.0), data.get("secant", 1.0)
-                table.update_cell_at((i, 0), name)
-                table.update_cell_at((i, 1), f"{kappa:.1f}")
-                table.update_cell_at((i, 2), str(data.get("memory_size", "-")))
-                table.update_cell_at((i, 3), f"{secant:.4f}")
-                table.update_cell_at((i, 4), Text(data.get("landscape", "Unknown"), style="yellow"))
-                table.update_cell_at((i, 5), generate_sparkline(data.get("kappa_history", []), 10))
-        else:
-            table.clear()
-            for name, data in layer_data.items():
-                kappa, secant = data.get("kappa", 1.0), data.get("secant", 1.0)
-                table.add_row(
-                    name, f"{kappa:.1f}", str(data.get("memory_size", "-")), f"{secant:.4f}",
-                    Text(data.get("landscape", "Unknown"), style="yellow"),
-                    generate_sparkline(data.get("kappa_history", []), 10)
-                )
+        table.clear()
+        for name, data in layer_data.items():
+            kappa, secant = data.get("kappa", 1.0), data.get("secant", 1.0)
+            table.add_row(
+                name, f"{kappa:.1f}", str(data.get("memory_size", "-")), f"{secant:.4f}",
+                Text(data.get("landscape", "Unknown"), style="yellow"),
+                generate_sparkline(data.get("kappa_history", []), 10)
+            )
 
         if evasion_events:
             log = self.query_one(RichLog)

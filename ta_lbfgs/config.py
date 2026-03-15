@@ -43,12 +43,66 @@ class TaLBFGSConfig:
     inner_optimizer: str = "SGD"  # inner loop optimizer for model weights
     inner_lr: float = 1e-3
 
+    # ── Inner Secant-Topology (Persistent Geometry) ─────────────────
+    inner_secant_topology_enabled: bool = True
+    inner_secant_warmup_steps: int = 10
+    inner_secant_top_k: int = 16
+    inner_secant_percentile: float = 95.0
+    inner_secant_symmetrize_enabled: bool = True
+    inner_secant_symmetry_assert_enabled: bool = True
+
+    # ── Curvature Scaling (rho_k^alpha) ──────────────────────────────
+    lbfgs_use_spectral_scaler: bool = True
+    lbfgs_spectral_mu: float = 0.2
+
+    # ── Outer-Loop Stabilization Wrappers (engineering controls) ────
+    outer_grad_clip_enabled: bool = False
+    outer_grad_clip_max_norm: float = 0.8
+    outer_lr_warmup_enabled: bool = False
+    outer_lr_warmup_steps: int = 10
+    outer_lr_warmup_start_scale: float = 0.1
+    outer_hp_ema_enabled: bool = False
+    outer_hp_ema_beta: float = 0.9
+    outer_plateau_detection_enabled: bool = False
+    outer_plateau_delta_epsilon: float = 1e-5
+    outer_plateau_patience: int = 3
+    lbfgs_reuse_history_across_outer: bool = True
+
+    # ── Outer Hutch++ Preconditioning (Strict Bilevel Stability) ─────
+    outer_hutchpp_precondition_enabled: bool = True
+    outer_hutchpp_samples: int = 5
+    outer_hutchpp_eps: float = 1e-8
+    outer_hutchpp_trace_enabled: bool = True
+    outer_hutchpp_diagonal_precondition_enabled: bool = True
+
+    # ── Evaluation / Diagnostics Integrity ────────────────────────────
+    strict_optimizer_label_binding: bool = True
+    diagnostics_spike_annotation_enabled: bool = True
+    diagnostics_spike_threshold: float = 0.8
+
     # ── Topology / Saddle Detection ──────────────────────────────────
     condition_svd_components: int = 8
     secant_threshold: float = 0.0
+    curvature_threshold: float = 0.2
     perturbation_scale: float = 0.01
     distance_threshold: float = 0.5  # Euler characteristic adjacency
     gradient_window_size: int = 10   # sliding window for topology analysis
+
+    # ── Autonomous Topology Discovery ────────────────────────────────
+    auto_topology_enabled: bool = True
+    auto_topology_warmup_steps: int = 50
+    auto_topology_sketch_dim: int = 256
+    auto_topology_edge_top_percentile: float = 95.0
+    auto_topology_active_coords: int = 64
+    auto_topology_nnz_per_row: int = 8
+    auto_topology_edge_budget: Optional[int] = None
+
+    # ── EDRT (Exponentially Decayed Rolling Topology) ────────────────
+    edrt_enabled: bool = True
+    edrt_refresh_interval: int = 1000
+    edrt_mini_warmup: int = 10
+    edrt_beta: float = 0.9
+    edrt_sparse_threshold: float = 0.05
 
     # ── Adaptive Memory ──────────────────────────────────────────────
     adaptive_memory_enabled: bool = True

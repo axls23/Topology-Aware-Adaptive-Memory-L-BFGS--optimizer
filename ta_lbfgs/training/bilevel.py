@@ -4,7 +4,7 @@ import inspect
 import math
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -58,6 +58,9 @@ class BilevelOptimizer:
             lr=config.lbfgs_lr,
             history_size=config.lbfgs_memory_base,
             line_search="None",  # Simplified for hyperparam space
+            damping=config.lbfgs_damping,
+            damping_eps=config.lbfgs_damping_eps,
+            curvature_threshold=config.curvature_threshold,
         )
 
         self.dashboard = OptimizerDashboard(
@@ -75,6 +78,253 @@ class BilevelOptimizer:
         self.validity_checks: List[Dict[str, float]] = []
         self.inner_sensitivity_debug: List[Dict[str, object]] = []
         self.active_hybrid_shard: Dict[str, Any] = {}
+        self._ema_deltas: List[Optional[torch.Tensor]] = []
+        self._hp_delta_window: List[float] = []
+        self._hp_updates_frozen: bool = False
+        self.hutch_trace_history: List[float] = []
+
+    @staticmethod
+    def _build_hvp_fn(
+        loss: torch.Tensor,
+        params: List[torch.Tensor],
+    ) -> Callable[[List[torch.Tensor]], List[torch.Tensor]]:
+        """Create an HVP callable that returns H @ v without materializing dense Hessian."""
+        first_grads = torch.autograd.grad(
+            loss,
+            params,
+            create_graph=True,
+            retain_graph=True,
+            allow_unused=True,
+        )
+
+        def hvp_fn(v_list: List[torch.Tensor]) -> List[torch.Tensor]:
+            dot = torch.zeros((), device=loss.device, dtype=loss.dtype)
+            for g, v in zip(first_grads, v_list):
+                if g is None:
+                    continue
+                dot = dot + torch.sum(g * v)
+
+            hvp_raw = torch.autograd.grad(
+                dot,
+                params,
+                retain_graph=True,
+                allow_unused=True,
+            )
+            out: List[torch.Tensor] = []
+            for hvi, pi in zip(hvp_raw, params):
+                if hvi is None:
+                    out.append(torch.zeros_like(pi))
+                else:
+                    out.append(hvi)
+            return out
+
+        return hvp_fn
+
+    def _set_outer_lr_for_step(self, outer_iter: int):
+        """Apply optional warm-up scaling to the outer optimizer learning rate."""
+        base_lr = float(self.config.lbfgs_lr)
+        scale = 1.0
+        if self.config.outer_lr_warmup_enabled:
+            warmup_steps = max(1, int(self.config.outer_lr_warmup_steps))
+            start_scale = float(self.config.outer_lr_warmup_start_scale)
+            start_scale = max(0.0, min(1.0, start_scale))
+            progress = min(1.0, float(outer_iter + 1) / float(warmup_steps))
+            scale = start_scale + (1.0 - start_scale) * progress
+
+        for group in self.outer_optimizer.param_groups:
+            group["lr"] = base_lr * scale
+
+    def _clip_hypergradients(
+        self,
+        hypergrads: List[torch.Tensor],
+    ) -> (List[torch.Tensor], float):
+        """Optionally clip hypergradient global norm without changing direction."""
+        grads = [g.clone() for g in hypergrads]
+        grad_norm = float(sum(g.norm().item() for g in grads if g is not None))
+
+        if not self.config.outer_grad_clip_enabled:
+            return grads, grad_norm
+
+        max_norm = float(self.config.outer_grad_clip_max_norm)
+        if max_norm <= 0.0:
+            return grads, grad_norm
+
+        stacked_norm = torch.sqrt(sum(torch.sum(g * g) for g in grads if g is not None))
+        if stacked_norm.item() > max_norm:
+            scale = max_norm / (stacked_norm.item() + 1e-12)
+            grads = [g * scale for g in grads]
+        clipped_norm = float(sum(g.norm().item() for g in grads if g is not None))
+        return grads, clipped_norm
+
+    @staticmethod
+    def _sanitize_hypergradients(
+        hypergrads: List[torch.Tensor],
+        fallback: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[List[torch.Tensor], bool]:
+        """Replace non-finite gradient values with safe finite tensors."""
+        sanitized: List[torch.Tensor] = []
+        recovered = False
+
+        for idx, grad in enumerate(hypergrads):
+            if grad is None:
+                recovered = True
+                if fallback is not None and idx < len(fallback) and fallback[idx] is not None:
+                    safe_grad = torch.nan_to_num(fallback[idx].detach(), nan=0.0, posinf=1.0, neginf=-1.0)
+                else:
+                    raise BilevelValidationError(
+                        f"Missing hypergradient tensor at index {idx} with no fallback available."
+                    )
+                sanitized.append(safe_grad)
+                continue
+
+            if torch.isfinite(grad).all().item():
+                sanitized.append(grad)
+                continue
+
+            recovered = True
+            if fallback is not None and idx < len(fallback) and fallback[idx] is not None and torch.isfinite(fallback[idx]).all().item():
+                safe_grad = fallback[idx].detach().clone()
+            else:
+                safe_grad = torch.nan_to_num(grad, nan=0.0, posinf=1.0, neginf=-1.0)
+            sanitized.append(safe_grad)
+
+        return sanitized, recovered
+
+    def _apply_hp_ema_damping(self, before_params: List[torch.Tensor]):
+        """Smooth raw outer updates with an EMA over parameter deltas."""
+        if not self.config.outer_hp_ema_enabled:
+            return
+
+        beta = float(self.config.outer_hp_ema_beta)
+        beta = max(0.0, min(0.9999, beta))
+        params = list(self.hyperparams.parameters())
+        if not self._ema_deltas or len(self._ema_deltas) != len(params):
+            self._ema_deltas = [None] * len(params)
+
+        with torch.no_grad():
+            for i, (p, p_before) in enumerate(zip(params, before_params)):
+                delta = p.data - p_before
+                prev = self._ema_deltas[i]
+                if prev is None:
+                    ema_delta = delta.clone()
+                else:
+                    ema_delta = beta * prev + (1.0 - beta) * delta
+                p.data.copy_(p_before + ema_delta)
+                self._ema_deltas[i] = ema_delta.detach().clone()
+
+    def _update_plateau_state(self, before_params: List[torch.Tensor]) -> float:
+        """Track HP update magnitude and optionally freeze future outer updates."""
+        with torch.no_grad():
+            sq_sum = 0.0
+            for p, p_before in zip(self.hyperparams.parameters(), before_params):
+                d = p.data - p_before
+                sq_sum += float(torch.sum(d * d).item())
+        delta_norm = float(math.sqrt(max(0.0, sq_sum)))
+
+        if not self.config.outer_plateau_detection_enabled:
+            return delta_norm
+
+        self._hp_delta_window.append(delta_norm)
+        patience = max(1, int(self.config.outer_plateau_patience))
+        eps = float(self.config.outer_plateau_delta_epsilon)
+        eps = max(0.0, eps)
+        if len(self._hp_delta_window) >= patience:
+            tail = self._hp_delta_window[-patience:]
+            if all(v <= eps for v in tail):
+                self._hp_updates_frozen = True
+        return delta_norm
+
+    def hutch_trace_estimate(
+        self,
+        hvp_fn: Callable[[List[torch.Tensor]], List[torch.Tensor]],
+        params: List[torch.Tensor],
+        m: int,
+    ) -> torch.Tensor:
+        """
+        Hutch++-style stochastic trace estimator.
+
+        Applied exclusively to meta-Hessian H_lambda. See Report Section 4.4.
+        Reference: Meyer, Musco, Musco & Woodruff (2021), SIMAX.
+        Note: estimates scalar Tr(H), not diagonal diag(H).
+        """
+        trace_sum: Optional[torch.Tensor] = None
+        for _ in range(max(1, int(m))):
+            z_list = [torch.randn_like(p) for p in params]
+            hz_list = hvp_fn(z_list)
+            contrib = torch.zeros((), device=params[0].device, dtype=params[0].dtype)
+            for z, hz in zip(z_list, hz_list):
+                contrib = contrib + torch.sum(z * hz)
+            if trace_sum is None:
+                trace_sum = contrib
+            else:
+                trace_sum = trace_sum + contrib
+
+        if trace_sum is None:
+            return torch.zeros((), device=params[0].device, dtype=params[0].dtype)
+        return trace_sum / float(max(1, int(m)))
+
+    def hutchinson_diagonal_estimate(
+        self,
+        hvp_fn: Callable[[List[torch.Tensor]], List[torch.Tensor]],
+        params: List[torch.Tensor],
+    ) -> List[torch.Tensor]:
+        """Rademacher Hutchinson estimator for diagonal diag(H_lambda)."""
+        eps = float(self.config.outer_hutchpp_eps)
+        m = max(1, int(self.config.outer_hutchpp_samples))
+
+        diag_accum: List[torch.Tensor] = [
+            torch.zeros_like(p, dtype=p.dtype, device=p.device) for p in params
+        ]
+
+        for _ in range(m):
+            z_list: List[torch.Tensor] = []
+            for p in params:
+                z = torch.randint(0, 2, p.shape, device=p.device, dtype=torch.int8)
+                z = z.to(dtype=p.dtype) * 2.0 - 1.0
+                z_list.append(z)
+
+            hvp = hvp_fn(z_list)
+            for i, (hvi, zi) in enumerate(zip(hvp, z_list)):
+                diag_accum[i] = diag_accum[i] + zi * hvi
+
+        diag_est = []
+        for d in diag_accum:
+            d = d / float(m)
+            d = torch.abs(d) + eps
+            diag_est.append(d)
+
+        return diag_est
+
+    def _precondition_hypergradients_hutchinson(
+        self,
+        val_loss: torch.Tensor,
+        hypergrads: List[torch.Tensor],
+        params: List[torch.Tensor],
+    ) -> Tuple[List[torch.Tensor], float]:
+        """Apply diagonal Hutchinson preconditioning; keep scalar trace estimate separate."""
+        hvp_fn = self._build_hvp_fn(val_loss, params)
+
+        if self.config.outer_hutchpp_trace_enabled:
+            trace_est = self.hutch_trace_estimate(
+                hvp_fn=hvp_fn,
+                params=params,
+                m=max(1, int(self.config.outer_hutchpp_samples)),
+            )
+            self.hutch_trace_history.append(float(trace_est.detach().item()))
+
+        if not self.config.outer_hutchpp_diagonal_precondition_enabled:
+            grad_norm = float(sum(g.norm().item() for g in hypergrads if g is not None))
+            return hypergrads, grad_norm
+
+        diag_est = self.hutchinson_diagonal_estimate(hvp_fn, params)
+        precond = []
+        for g, d in zip(hypergrads, diag_est):
+            d_safe = torch.nan_to_num(d, nan=float(self.config.outer_hutchpp_eps), posinf=1e6, neginf=float(self.config.outer_hutchpp_eps))
+            d_safe = torch.clamp(d_safe, min=float(self.config.outer_hutchpp_eps))
+            pre = torch.nan_to_num(g / d_safe, nan=0.0, posinf=1.0, neginf=-1.0)
+            precond.append(pre)
+        grad_norm = float(sum(g.norm().item() for g in precond if g is not None))
+        return precond, grad_norm
 
     @staticmethod
     def _infer_layer_index(param_name: str, fallback_layers: int) -> int:
@@ -367,6 +617,7 @@ class BilevelOptimizer:
             cg_tol=self.config.cg_tol,
             neumann_terms=self.config.neumann_terms,
         )
+        hypergradients, recovered = self._sanitize_hypergradients(hypergradients)
 
         return {
             "train_loss": train_loss,
@@ -375,6 +626,7 @@ class BilevelOptimizer:
             "hypergradients": hypergradients,
             "inner_sensitivity_debug": sensitivity_debug,
             "hybrid_shard": self.active_hybrid_shard,
+            "nonfinite_hypergrad_recovered": recovered,
         }
 
     def optimize(
@@ -415,12 +667,9 @@ class BilevelOptimizer:
         try:
             for outer_iter in range(config.outer_steps):
                 latest_state: Dict[str, Any] = {}
+                hp_before = [p.detach().clone() for p in self.hyperparams.parameters()]
 
-                def outer_closure():
-                    latest_state.clear()
-                    for p in self.hyperparams.parameters():
-                        p.grad = None
-
+                if config.outer_hutchpp_precondition_enabled:
                     state = self._evaluate_bilevel_state(
                         model,
                         train_fn,
@@ -429,14 +678,77 @@ class BilevelOptimizer:
                         val_data,
                         outer_iter,
                     )
+                    params = list(self.hyperparams.parameters())
+                    eta = float(self.config.lbfgs_lr)
+                    precond_grads, _ = self._precondition_hypergradients_hutchinson(
+                        state["val_loss"],
+                        state["hypergradients"],
+                        params,
+                    )
+                    sanitized_grads, recovered = self._sanitize_hypergradients(
+                        precond_grads,
+                        fallback=state["hypergradients"],
+                    )
+                    clipped_grads, _ = self._clip_hypergradients(sanitized_grads)
+                    state["hypergradients"] = clipped_grads
+                    if recovered:
+                        state["nonfinite_hypergrad_recovered"] = True
+                    if self.hutch_trace_history:
+                        curr_trace = self.hutch_trace_history[-1]
+                        state["hutch_trace"] = curr_trace
+                        if len(self.hutch_trace_history) > 1:
+                            prev_trace = self.hutch_trace_history[-2]
+                            rel_drift = abs(curr_trace - prev_trace) / (abs(prev_trace) + 1e-8)
+                            state["hutch_trace_drift_triggered"] = rel_drift > 0.2
+                    with torch.no_grad():
+                        for p, g in zip(params, state["hypergradients"]):
+                            p.data.add_(g, alpha=-eta)
                     latest_state.update(state)
+                else:
+                    self._set_outer_lr_for_step(outer_iter)
 
-                    for param, grad in zip(self.hyperparams.parameters(), state["hypergradients"]):
-                        param.grad = grad
+                    if not config.lbfgs_reuse_history_across_outer:
+                        self.outer_optimizer.clear_history()
 
-                    return state["val_loss"]
+                    def outer_closure():
+                        latest_state.clear()
+                        for p in self.hyperparams.parameters():
+                            p.grad = None
 
-                self.outer_optimizer.step(outer_closure)
+                        local_state = self._evaluate_bilevel_state(
+                            model,
+                            train_fn,
+                            val_fn,
+                            train_data,
+                            val_data,
+                            outer_iter,
+                        )
+                        latest_state.update(local_state)
+
+                        grads_to_apply, _ = self._clip_hypergradients(local_state["hypergradients"])
+                        latest_state["hypergradients"] = grads_to_apply
+                        for param, grad in zip(self.hyperparams.parameters(), grads_to_apply):
+                            param.grad = grad
+
+                        return local_state["val_loss"]
+
+                    if self._hp_updates_frozen:
+                        frozen_state = self._evaluate_bilevel_state(
+                            model,
+                            train_fn,
+                            val_fn,
+                            train_data,
+                            val_data,
+                            outer_iter,
+                        )
+                        clipped_hg, _ = self._clip_hypergradients(frozen_state["hypergradients"])
+                        frozen_state["hypergradients"] = clipped_hg
+                        latest_state.update(frozen_state)
+                    else:
+                        self.outer_optimizer.step(outer_closure)
+                        self._apply_hp_ema_damping(hp_before)
+
+                hp_delta_norm = self._update_plateau_state(hp_before)
 
                 if not latest_state:
                     raise RuntimeError("Outer closure did not produce a bilevel state.")
@@ -509,7 +821,8 @@ class BilevelOptimizer:
                     if outer_iter % 5 == 0:
                         self.dashboard.add_log(
                             f"Iter {outer_iter}: train={train_loss_val:.6f} val={loss_val:.6f} "
-                            f"lr={outer_state['lr']:.6f} wd={outer_state['wd']:.6f}"
+                            f"lr={outer_state['lr']:.6f} wd={outer_state['wd']:.6f} "
+                            f"|hg|={grad_mag:.3e} dHP={hp_delta_norm:.3e} frozen={int(self._hp_updates_frozen)}"
                         )
 
                 if progress_callback is not None:
@@ -521,6 +834,8 @@ class BilevelOptimizer:
                             "val_loss": loss_val,
                             "best_loss": self.best_loss,
                             "grad_magnitude": grad_mag,
+                            "hp_delta_norm": hp_delta_norm,
+                            "hp_updates_frozen": self._hp_updates_frozen,
                             "hyperparams": hp_dict,
                             "sensitivity_debug": sensitivity_debug,
                             "hybrid_shard": hybrid_shard,
@@ -540,6 +855,8 @@ class BilevelOptimizer:
             "hyperparam_history": self.hyperparam_history,
             "final_hyperparams": self.hyperparams.as_float_dict(),
             "grad_magnitude_history": self.grad_magnitude_history,
+            "hp_delta_history": self._hp_delta_window,
+            "hp_updates_frozen": self._hp_updates_frozen,
             "validity_checks": self.validity_checks,
             "inner_sensitivity_debug": self.inner_sensitivity_debug,
             "hybrid_shard": self.active_hybrid_shard,

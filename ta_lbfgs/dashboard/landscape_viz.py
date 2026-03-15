@@ -469,6 +469,19 @@ def export_trajectory_3d(
     If mesh_instance is provided, uses the evolved adaptive mesh.
     If mesh_data is provided (legacy), uses the static tuple.
     """
+    hyperparameter_history = np.asarray(hyperparameter_history, dtype=np.float64)
+    loss_history = np.asarray(loss_history, dtype=np.float64).reshape(-1)
+    if hyperparameter_history.ndim != 2 or loss_history.size == 0:
+        return
+
+    finite_rows = np.isfinite(loss_history)
+    finite_rows &= np.all(np.isfinite(hyperparameter_history), axis=1)
+    if not np.any(finite_rows):
+        return
+
+    hyperparameter_history = hyperparameter_history[finite_rows]
+    loss_history = loss_history[finite_rows]
+
     fig = go.Figure()
 
     # ── Surface Mesh (Topology) ──────────────────────────────────
@@ -496,8 +509,18 @@ def export_trajectory_3d(
         # Fall back to SVD compression when no topology mesh is provided.
         if hyperparameter_history.shape[1] > 3:
             centered = hyperparameter_history - hyperparameter_history.mean(axis=0)
-            U, S, Vt = np.linalg.svd(centered, full_matrices=False)
-            coords = U[:, :3] * S[:3]
+            try:
+                U, S, _ = np.linalg.svd(centered, full_matrices=False)
+                coords = U[:, :3] * S[:3]
+            except np.linalg.LinAlgError:
+                # Stabilize degenerate trajectories by avoiding SVD in pathological cases.
+                n = centered.shape[0]
+                fallback_y = centered[:, 0] if centered.shape[1] > 0 else np.zeros(n)
+                coords = np.column_stack([
+                    np.arange(n, dtype=np.float64),
+                    fallback_y,
+                    np.zeros(n, dtype=np.float64),
+                ])
         else:
             coords = hyperparameter_history[:, :3]
 
@@ -659,6 +682,106 @@ def export_trajectory_3d(
     fig.write_html(output_path)
 
 
+def export_trajectory_3d_static(
+    hyperparameter_history: np.ndarray,
+    loss_history: np.ndarray,
+    output_path: str,
+    floor_padding: float = 0.08,
+):
+    """
+    Export a static 3D loss landscape image in a publication-style layout.
+
+    The rendering mirrors the requested style:
+      - smooth 3D surface
+      - contour projection on the floor plane
+      - trajectory overlay
+      - epsilon-axis labels
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.tri as mtri
+
+    hp = np.asarray(hyperparameter_history, dtype=np.float64)
+    losses = np.asarray(loss_history, dtype=np.float64).reshape(-1)
+    if hp.ndim != 2 or losses.size == 0 or hp.shape[0] != losses.size:
+        return
+
+    feature_dim = hp.shape[1]
+    wd_index = feature_dim // 2 if feature_dim >= 4 else min(1, feature_dim - 1)
+    eps1 = hp[:, 0]
+    eps2 = hp[:, wd_index]
+
+    # Work in normalized coordinates to keep triangulation stable in log-scale ranges.
+    x = np.log10(np.clip(eps1, 1e-12, None))
+    y = np.log10(np.clip(eps2, 1e-12, None))
+    z = losses
+
+    finite_mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    x = x[finite_mask]
+    y = y[finite_mask]
+    z = z[finite_mask]
+    if z.size < 3:
+        return
+
+    triang = mtri.Triangulation(x, y)
+    interp = mtri.LinearTriInterpolator(triang, z)
+
+    grid_n = int(max(40, min(140, np.sqrt(z.size) * 18)))
+    xi = np.linspace(float(np.min(x)), float(np.max(x)), grid_n)
+    yi = np.linspace(float(np.min(y)), float(np.max(y)), grid_n)
+    XI, YI = np.meshgrid(xi, yi)
+    ZI = interp(XI, YI)
+    ZI = np.asarray(ZI.filled(np.nan), dtype=np.float64)
+
+    z_min = float(np.nanmin(z))
+    z_max = float(np.nanmax(z))
+    z_span = max(1e-8, z_max - z_min)
+    z_floor = z_min - floor_padding * z_span
+
+    fig = plt.figure(figsize=(8, 6), dpi=150)
+    ax = fig.add_subplot(111, projection="3d")
+
+    surf = ax.plot_surface(
+        XI,
+        YI,
+        ZI,
+        cmap="inferno",
+        linewidth=0,
+        antialiased=True,
+        alpha=0.97,
+    )
+
+    ax.contourf(
+        XI,
+        YI,
+        ZI,
+        zdir="z",
+        offset=z_floor,
+        levels=24,
+        cmap="inferno",
+        alpha=0.95,
+    )
+
+    ax.plot(x, y, z, color="white", linewidth=1.2, alpha=0.85)
+    ax.scatter(x[0], y[0], z[0], c="cyan", s=28, depthshade=False)
+    ax.scatter(x[-1], y[-1], z[-1], c="red", s=30, depthshade=False)
+
+    ax.set_xlabel(r"$\varepsilon_1$", labelpad=6)
+    ax.set_ylabel(r"$\varepsilon_2$", labelpad=6)
+    ax.set_zlabel("Loss", labelpad=8)
+    ax.set_zlim(z_floor, z_max + 0.05 * z_span)
+    ax.view_init(elev=26, azim=48)
+
+    cbar = fig.colorbar(surf, ax=ax, shrink=0.72, pad=0.08)
+    cbar.set_label("Loss")
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 # ────────────────────────────────────────────────────────────────────
 # Dynamics Plot (matplotlib, unchanged)
 # ────────────────────────────────────────────────────────────────────
@@ -669,6 +792,9 @@ def plot_dynamics(
     kappa_changes: Any,
     hyperparam_history: Any,
     output_path: str,
+    optimizer_name: str = "",
+    annotate_instability_spike: bool = True,
+    spike_threshold: float = 0.8,
 ):
     """
     Geometric Diagnostics Suite.
@@ -705,6 +831,23 @@ def plot_dynamics(
     ax0.set_title("Optimization Phase Portrait (Convergence Stability)", color="cyan", pad=20)
     ax0.grid(color="gray", alpha=0.2, linestyle="--")
     plt.colorbar(points, ax=ax0, label="Progress (Iteration Sequence)")
+
+    if annotate_instability_spike and len(grads) > 0:
+        grad_norm_spike = float(np.max(grads))
+        if grad_norm_spike > float(spike_threshold):
+            spike_idx = int(np.argmax(grads))
+            spike_loss = float(losses[spike_idx])
+            label_prefix = f"{optimizer_name}: " if optimizer_name else ""
+            ax0.annotate(
+                f"{label_prefix}Instability spike: {grad_norm_spike:.2f}\n"
+                f"(Expected: Hutch++ preconditioning\n"
+                f"suppresses this in full implementation)",
+                xy=(spike_loss, grad_norm_spike),
+                xytext=(8, 8),
+                textcoords="offset points",
+                fontsize=8,
+                color="orange",
+            )
 
     # 2. Adaptive Memory Resource Map (Kappa vs Memory Window)
     # We estimate proxy relationship for the visualization

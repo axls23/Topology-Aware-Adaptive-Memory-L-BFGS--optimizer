@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from ..core.hyperparameters import DifferentiableHyperparameters
+from ..core.lbfgs import classify_param_group, should_freeze_in_inner_loop
 
 try:
     from torch.func import functional_call as torch_functional_call
@@ -43,6 +44,7 @@ def inner_train(
     steps: int = 10,
     create_graph: bool = True,
     initial_params: Optional[OrderedDict[str, torch.Tensor]] = None,
+    l2_inner_reg: float = 1e-4,
     enable_sensitivity_debug: bool = False,
     mismatch_threshold: float = 0.5,
     disconnect_ratio: float = 0.1,
@@ -109,7 +111,11 @@ def inner_train(
         actual_history: List[float] = []
 
     for step_idx in range(steps):
-        final_loss = loss_fn(adapted_params)
+        # ADDS: explicit L2 term in inner objective to support mu-strong-convexity assumptions.
+        # REMOVES: raw unregularized inner loss assignment in this function.
+        base_loss = loss_fn(adapted_params)
+        reg_loss = l2_inner_reg * sum(p.norm() ** 2 for p in adapted_params.values())
+        final_loss = base_loss + reg_loss
         grads = torch.autograd.grad(
             final_loss,
             tuple(adapted_params.values()),
@@ -120,6 +126,13 @@ def inner_train(
 
         updated_params: OrderedDict[str, torch.Tensor] = OrderedDict()
         for (name, param), grad in zip(adapted_params.items(), grads):
+            # ADDS: freeze guard for rope/embedding groups during inner-loop updates.
+            # REMOVES: unconditional update attempts over all parameter groups.
+            group = classify_param_group(name, param, model)
+            if should_freeze_in_inner_loop(group):
+                updated_params[name] = param
+                continue
+
             if grad is None:
                 updated_params[name] = param
                 continue

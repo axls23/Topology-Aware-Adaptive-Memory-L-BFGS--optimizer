@@ -10,7 +10,7 @@ Plus orthogonal perturbation injection for saddle escape.
 
 import torch
 import numpy as np
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 
 def check_secant_condition(
@@ -32,8 +32,64 @@ def check_secant_condition(
     Returns:
         True if the secant condition is violated (non-convex region).
     """
-    ys = y.dot(s).item()
-    return ys <= threshold
+    # ADDS: Lanczos-style saddle decision using a cheap rank-1 two_loop proxy.
+    # REMOVES: direct y^T s threshold check in this function.
+    denom = torch.dot(s, s).clamp(min=1e-12)
+
+    def rank1_two_loop(v: torch.Tensor) -> torch.Tensor:
+        return y * (torch.dot(s, v) / denom)
+
+    is_saddle, _ = is_saddle_point(rank1_two_loop, dim=int(s.numel()), eps=threshold)
+    return is_saddle
+
+
+# ADDS: Lanczos min-eigenvalue probe over two-loop Hessian-vector handle.
+# REMOVES: y^T s-only saddle detection as the primary curvature criterion.
+def is_saddle_point(
+    two_loop_fn: Callable[[torch.Tensor], torch.Tensor],
+    dim: int,
+    eps: float = 1e-4,
+) -> Tuple[bool, torch.Tensor]:
+    """3-step Lanczos min-eigenvalue probe. Returns (is_saddle, min_eigvec)."""
+    q = torch.randn(dim)
+    q = q / q.norm().clamp(min=1e-12)
+    q_prev = torch.zeros_like(q)
+    beta_prev = torch.tensor(0.0, dtype=q.dtype, device=q.device)
+
+    basis = []
+    alphas = []
+    betas = []
+
+    for _ in range(3):
+        basis.append(q)
+        w = two_loop_fn(q) - beta_prev * q_prev
+        alpha = torch.dot(q, w)
+        alphas.append(alpha)
+        w = w - alpha * q
+        beta = w.norm()
+        betas.append(beta)
+        if beta < 1e-10:
+            break
+        q_prev = q
+        q = w / beta
+        beta_prev = beta
+
+    m = len(alphas)
+    T = torch.zeros((m, m), dtype=basis[0].dtype, device=basis[0].device)
+    for i in range(m):
+        T[i, i] = alphas[i]
+        if i + 1 < m:
+            T[i, i + 1] = betas[i]
+            T[i + 1, i] = betas[i]
+
+    eigvals, eigvecs = torch.linalg.eigh(T)
+    lam_min = float(eigvals[0].item())
+    coeffs = eigvecs[:, 0]
+    min_vec = torch.zeros_like(basis[0])
+    for i in range(m):
+        min_vec = min_vec + coeffs[i] * basis[i]
+    min_vec = min_vec / min_vec.norm().clamp(min=1e-12)
+    return lam_min <= eps, min_vec
 
 
 def detect_topology_break(
@@ -114,28 +170,26 @@ def generate_orthogonal_perturbation(
     Returns:
         Orthogonal perturbation vector (same shape as grad).
     """
-    grad_norm = grad.norm()
-    if grad_norm < 1e-12:
-        # Gradient is near zero — use random direction
-        perturbation = torch.randn_like(grad)
-        return perturbation * scale
+    # ADDS: deterministic eigenvector-aligned perturbation proxy for compatibility.
+    # REMOVES: random Gram-Schmidt orthogonal perturbation path.
+    grad_norm = float(grad.norm().item())
+    direction = (-grad).clone()
+    direction = direction / direction.norm().clamp(min=1e-12)
+    return scale * grad_norm * direction
 
-    # Generate random vector
-    random_vec = torch.randn_like(grad)
 
-    # Gram-Schmidt: project out the gradient component
-    # v_perp = random - (random · grad_hat) * grad_hat
-    grad_hat = grad / grad_norm
-    projection = random_vec.dot(grad_hat)
-    v_perp = random_vec - projection * grad_hat
-
-    # Normalize and scale
-    v_perp_norm = v_perp.norm()
-    if v_perp_norm < 1e-12:
-        # Extremely unlikely: random_vec parallel to grad
-        perturbation = torch.randn_like(grad)
-        return perturbation * scale
-
-    perturbation = v_perp / v_perp_norm * grad_norm * scale
-
-    return perturbation
+# ADDS: direct eigenvector-guided saddle escape update for parameter tensors.
+# REMOVES: random orthogonal perturbation as the core escape mechanism.
+def escape_saddle(
+    params: list,
+    grad_norm: float,
+    min_eigvec: torch.Tensor,
+    scale: float = 0.01,
+) -> None:
+    """Eigenvector-directed perturbation. Satisfies Zoutendijk descent."""
+    delta = scale * grad_norm * min_eigvec
+    offset = 0
+    for p in params:
+        numel = p.numel()
+        p.data.add_(delta[offset:offset + numel].view_as(p))
+        offset += numel

@@ -1,4 +1,4 @@
-"""
+﻿"""
 ta-LBFGS Demo: Synthetic Bilevel Optimization with Live CLI Dashboard.
 
 Demonstrates the full ta-LBFGS pipeline:
@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import threading
+import webbrowser
 from datetime import datetime
 
 from ta_lbfgs.config import TaLBFGSConfig
@@ -32,6 +33,7 @@ from ta_lbfgs.topology.adaptive_memory import compute_memory_size
 from ta_lbfgs.topology.saddle import check_secant_condition, generate_orthogonal_perturbation
 from ta_lbfgs.core.lbfgs import LayerwiseTaLBFGS
 from ta_lbfgs.dashboard.textual_dashboard import TextualDashboard
+from ta_lbfgs.dashboard.server import DashboardServer
 from ta_lbfgs.dashboard.landscape_viz import (
     export_trajectory_3d,
     plot_dynamics,
@@ -62,9 +64,9 @@ from ta_lbfgs.training.data_preprocessing import (
 )
 
 
-# ────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Synthetic Multi-Layer Problem
-# ────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class SyntheticLayer(nn.Module):
     """
@@ -349,7 +351,7 @@ class HFModelWrapper(nn.Module):
         """Create a surrogate loss that flows through hyperparams."""
         base = self._get_base_loss()
         # Create a differentiable surrogate that connects hyperparams to the loss
-        # This models: loss ≈ base_loss * f(lr, wd) where f captures the effect
+        # This models: loss â‰ˆ base_loss * f(lr, wd) where f captures the effect
         lr_penalty = sum(hyperparams.get_layer_lr(i) for i in range(len(self.layers)))
         wd_penalty = sum(hyperparams.get_layer_wd(i) for i in range(len(self.layers)))
         surrogate = base * (1.0 + 0.1 * lr_penalty) + 0.01 * wd_penalty
@@ -368,13 +370,15 @@ class HFModelWrapper(nn.Module):
         self._cached_base_loss = None
 
 
-# ────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Demo Runner
-# ────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def run_demo(
     config: TaLBFGSConfig,
     use_dashboard: bool = True,
+    use_web_dashboard: bool = True,
+    web_hold_seconds: float = 20.0,
     use_hf: bool = False,
     optimizer_mode: str = "ta-lbfgs",
     trainable_scope: str = "subset",
@@ -386,12 +390,12 @@ def run_demo(
 
     print("\n" + "=" * 60)
     print(
-        f"  ta-LBFGS Optimizer — {'Hugging Face' if use_hf else 'Synthetic'} Demo "
+        f"  ta-LBFGS Optimizer â€” {'Hugging Face' if use_hf else 'Synthetic'} Demo "
         f"({optimizer_mode})"
     )
     print("=" * 60)
 
-    # ── Setup ────────────────────────────────────────────────────
+    # â”€â”€ Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if use_hf and HAS_HF:
         resolved_scope = trainable_scope
         if trainable_scope == "full" and low_vram:
@@ -466,10 +470,20 @@ def run_demo(
     landscape_mesh = generate_landscape_mesh(model, hyperparams, n_points=15)
     
     # Initialize Architecture Interceptor
-    interceptor = ArchitectureInterceptor(model)
+    interceptor = ArchitectureInterceptor(model)    # Dashboard
+    dashboard = TextualDashboard() if (use_dashboard and not use_web_dashboard) else None
+    web_dashboard = DashboardServer(port=7860) if (use_dashboard and use_web_dashboard) else None
+    if web_dashboard is not None:
+        web_dashboard.start()
+        print(f"[INFO] Web dashboard available at: {web_dashboard.base_url}")
+        try:
+            webbrowser.open(web_dashboard.base_url)
+        except Exception:
+            pass
 
-    # Dashboard
-    dashboard = TextualDashboard() if use_dashboard else None
+    pivot_steps = []
+    spectral_guard_steps = []
+    event_feed = []
     
     # Ground architectural variables (dropout, attn_temp) to the model
     interceptor.ground_architectural_variables(hyperparams)
@@ -482,7 +496,53 @@ def run_demo(
         if kappa_val > 10:
             return "Ill-Conditioned"
         return "Convex Bowl"
+    def publish_web_state(iter_idx: int, loss_val: float, hp_dict: dict, layer_data: dict, status: str = "running"):
+        if web_dashboard is None:
+            return
 
+        heat_kappa, valid_mask, head_buffers = _heads_from_layer_data(layer_data, iter_idx, heads_per_layer=8)
+        valid_flat = [v for row in valid_mask for v in row]
+        topology_valid_pct = 100.0 * (sum(1 for v in valid_flat if v) / max(len(valid_flat), 1))
+        mean_kappa = float(np.mean([v for row in heat_kappa for v in row])) if heat_kappa else 1.0
+
+        if any(v.get("secant", 0.0) <= 0.0 for v in layer_data.values()):
+            pivot_steps.append(iter_idx)
+            event_feed.append(f"step {iter_idx + 1}: pivot detected (topology re-derived)")
+
+        if any(v.get("kappa", 0.0) >= 10000.0 for v in layer_data.values()):
+            spectral_guard_steps.append(iter_idx)
+            event_feed.append(f"step {iter_idx + 1}: spectral guard fired")
+
+        if len(event_feed) > 100:
+            del event_feed[:-100]
+
+        web_dashboard.publish(
+            {
+                "run": {
+                    "status": status,
+                    "val_loss": float(loss_val),
+                    "outer_step": int(iter_idx + 1),
+                    "max_outer_steps": int(config.outer_steps),
+                    "mean_kappa": mean_kappa,
+                    "topology_valid_pct": topology_valid_pct,
+                },
+                "heatmap": {
+                    "num_layers": int(n_layers),
+                    "heads_per_layer": 8,
+                    "kappa": heat_kappa,
+                    "valid_mask": valid_mask,
+                },
+                "head_buffers": head_buffers,
+                "experts": _expert_rows_from_hparams(hp_dict, layer_data, n_experts=8),
+                "trajectory": {
+                    "loss": [float(v) for v in loss_history],
+                    "pivot_steps": pivot_steps[-64:],
+                    "spectral_guard_steps": spectral_guard_steps[-64:],
+                },
+                "chain": _chain_payload(iter_idx, config.outer_steps, topology_valid_pct >= 80.0),
+                "events": event_feed[-60:],
+            }
+        )
     def build_dashboard_layer_data(
         hp_dict: dict,
         iter_idx: int,
@@ -557,13 +617,20 @@ def run_demo(
                         hyperparams.clamp()
                         hp_dict = hyperparams.as_float_dict()
                         hyperparam_history.append(hp_dict)
+                        layer_data = build_dashboard_layer_data(
+                            hp_dict,
+                            outer_iter,
+                            grad_mag_holder["value"],
+                        )
+                        publish_web_state(
+                            outer_iter,
+                            loss_val,
+                            hp_dict,
+                            layer_data,
+                            status="running",
+                        )
 
                         if dashboard:
-                            layer_data = build_dashboard_layer_data(
-                                hp_dict,
-                                outer_iter,
-                                grad_mag_holder["value"],
-                            )
                             outer_state = {
                                 "iteration": outer_iter + 1,
                                 "total_iterations": config.outer_steps,
@@ -620,11 +687,13 @@ def run_demo(
                     nonlocal best_loss
                     best_loss = min(best_loss, best_local)
 
+                    sens = step_info.get("sensitivity_debug") or {}
+                    disconnect_step = sens.get("first_suspected_disconnect_step")
+                    secant_proxy = -1e-3 if disconnect_step is not None else 1e-2
+                    layer_data = build_dashboard_layer_data(hp_dict, iter_idx, grad_mag, secant_proxy=secant_proxy)
+                    publish_web_state(iter_idx, loss_val, hp_dict, layer_data, status="running")
+
                     if dashboard:
-                        sens = step_info.get("sensitivity_debug") or {}
-                        disconnect_step = sens.get("first_suspected_disconnect_step")
-                        secant_proxy = -1e-3 if disconnect_step is not None else 1e-2
-                        layer_data = build_dashboard_layer_data(hp_dict, iter_idx, grad_mag, secant_proxy=secant_proxy)
                         outer_state = {
                             "iteration": int(step_info["iteration"]),
                             "total_iterations": int(step_info["total_iterations"]),
@@ -651,7 +720,6 @@ def run_demo(
                                 "[bold red]Sensitivity disconnect suspected[/] "
                                 f"at inner step {disconnect_step}"
                             )
-
                 result = bilevel_opt.optimize(
                     model,
                     hf_train_fn,
@@ -677,7 +745,7 @@ def run_demo(
             prev_avg_kappa = 1.0
 
             for outer_iter in range(config.outer_steps):
-                # ── Inner Loop (simplified: single forward) ─────────
+                # â”€â”€ Inner Loop (simplified: single forward) â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 hyperparams.zero_grad()
 
                 train_loss = model.train_loss(hyperparams)
@@ -688,7 +756,7 @@ def run_demo(
                 if loss_val < best_loss:
                     best_loss = loss_val
 
-                # ── Hypergradient ───────────────────────────────────
+                # â”€â”€ Hypergradient â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 val_loss.backward(retain_graph=True)
 
                 grad_mag = sum(
@@ -718,7 +786,7 @@ def run_demo(
                         else:
                             p.grad = g.detach()
 
-                # ── Outer Step (Layerwise ta-LBFGS) ─────────────────
+                # â”€â”€ Outer Step (Layerwise ta-LBFGS) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 # We iterate through layers and apply the ta-LBFGS update
                 # using the pre-computed kappa for each layer block.
                 
@@ -743,7 +811,7 @@ def run_demo(
                 hp_dict = hyperparams.as_float_dict()
                 hyperparam_history.append(hp_dict)
 
-                # ── Per-Layer Topology Analysis ─────────────────────
+                # â”€â”€ Per-Layer Topology Analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 layer_data = {}
                 avg_kappa = 0.0
 
@@ -842,7 +910,7 @@ def run_demo(
                         "iteration": outer_iter,
                     }
 
-                    # ── PERFORM ta-LBFGS STEP FOR THIS LAYER ────────
+                    # â”€â”€ PERFORM ta-LBFGS STEP FOR THIS LAYER â”€â”€â”€â”€â”€â”€â”€â”€
                     # This replaces the manual SGD update with a topology-aware search
                     ta_lbfgs_opt.step_layer(
                         name, 
@@ -865,7 +933,7 @@ def run_demo(
                     loss=loss_val,
                 )
 
-                # ── Dashboard Update ────────────────────────────────
+                # â”€â”€ Dashboard Update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 if dashboard:
                     outer_state = {
                         "iteration": outer_iter + 1,
@@ -899,7 +967,7 @@ def run_demo(
                         mesh=landscape_mesh
                     )
 
-                # ── Incremental HTML Update (Periodically) ──────────
+                # â”€â”€ Incremental HTML Update (Periodically) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 if outer_iter % 10 == 0:
                     try:
                         # Ensure we detach for numpy conversion
@@ -945,20 +1013,26 @@ def run_demo(
         if dashboard:
             dashboard.call_from_thread(
                 dashboard.update_log, 
-                "[bold green]✔ OPTIMIZATION COMPLETE. Press 'q' to view summary and exit.[/]"
+                "[bold green]âœ” OPTIMIZATION COMPLETE. Press 'q' to view summary and exit.[/]"
             )
 
-    # ── Run ──────────────────────────────────────────────────────
+    # Run
     if dashboard:
         thread = threading.Thread(target=optimization_task)
         thread.start()
         dashboard.run()
         thread.join()
     else:
-        # Run sync in main thread
         optimization_task()
 
-    # ── Export Visualizations ────────────────────────────────────
+    if web_dashboard is not None:
+        hold_s = max(0.0, float(web_hold_seconds))
+        if hold_s > 0.0:
+            print(f"[INFO] Web dashboard will stay up for {hold_s:.1f}s at {web_dashboard.base_url}")
+            time.sleep(hold_s)
+        web_dashboard.stop()
+
+    # â”€â”€ Export Visualizations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     output_dir = config.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
@@ -989,7 +1063,7 @@ def run_demo(
         plot_hyperparameter_trajectories(hyperparam_history, hp_plot_path)
         print(f"  Hyperparameter plot exported to: {hp_plot_path}")
 
-    # ── Summary ─────────────────────────────────────────────────
+    # â”€â”€ Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     hp_dict = hyperparams.as_float_dict()
     print(f"\n{'=' * 60}")
     print(f"  Final Optimization Results Summary")
@@ -1019,13 +1093,13 @@ def run_demo(
     }
 
 
-# ────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # CLI Entry Point
-# ────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def main():
     parser = argparse.ArgumentParser(
-        description="ta-LBFGS Optimizer — Synthetic Bilevel Demo"
+        description="ta-LBFGS Optimizer â€” Synthetic Bilevel Demo"
     )
     parser.add_argument("--outer-steps", type=int, default=40)
     parser.add_argument("--inner-steps", type=int, default=5)
@@ -1034,11 +1108,12 @@ def main():
     parser.add_argument("--no-dashboard", action="store_true")
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--model", type=str, default="synthetic", choices=["synthetic", "hf"])
-    parser.add_argument("--model-id", type=str, default="Qwen/Qwen2.5-0.5B")
     parser.add_argument("--optimizer", type=str, default="ta-lbfgs", choices=["ta-lbfgs", "lbfgs"])
     parser.add_argument("--trainable-scope", type=str, default="subset", choices=["subset", "full", "hybrid"])
     parser.add_argument("--low-vram", action="store_true")
     parser.add_argument("--hybrid-shard-fraction", type=float, default=0.125)
+    parser.add_argument("--textual-dashboard", action="store_true")
+    parser.add_argument("--web-hold-seconds", type=float, default=20.0)
     args = parser.parse_args()
 
     config = TaLBFGSConfig(
@@ -1054,12 +1129,13 @@ def main():
             run_demo(
                 config,
                 use_dashboard=not args.no_dashboard,
+                use_web_dashboard=(not args.textual_dashboard),
+                web_hold_seconds=args.web_hold_seconds,
                 use_hf=True,
                 optimizer_mode=args.optimizer,
                 trainable_scope=args.trainable_scope,
                 low_vram=args.low_vram,
                 hybrid_shard_fraction=args.hybrid_shard_fraction,
-                hf_model_name=args.model_id,
             )
         else:
             print("[ERROR] Hugging Face mode requested but 'transformers' or 'torch' is missing.")
@@ -1067,6 +1143,8 @@ def main():
             run_demo(
                 config,
                 use_dashboard=not args.no_dashboard,
+                use_web_dashboard=(not args.textual_dashboard),
+                web_hold_seconds=args.web_hold_seconds,
                 use_hf=False,
                 optimizer_mode=args.optimizer,
                 trainable_scope=args.trainable_scope,
@@ -1077,6 +1155,8 @@ def main():
         run_demo(
             config,
             use_dashboard=not args.no_dashboard,
+            use_web_dashboard=(not args.textual_dashboard),
+            web_hold_seconds=args.web_hold_seconds,
             use_hf=False,
             optimizer_mode=args.optimizer,
             trainable_scope=args.trainable_scope,
@@ -1087,3 +1167,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+

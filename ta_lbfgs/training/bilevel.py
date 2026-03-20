@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from ..config import TaLBFGSConfig
 from ..core.baseline_lbfgs import FullBatchLBFGS
-from ..core.hypergradient import implicit_differentiation
+from ..core.hypergradient import implicit_differentiation, outer_precondition
 from ..core.hyperparameters import DifferentiableHyperparameters
 from ..dashboard.live_dashboard import OptimizerDashboard
 from .inner_loop import inner_train
@@ -82,6 +82,159 @@ class BilevelOptimizer:
         self._hp_delta_window: List[float] = []
         self._hp_updates_frozen: bool = False
         self.hutch_trace_history: List[float] = []
+        self._sach_probe_cache: Optional[torch.Tensor] = None
+        self._sach_cache_age: int = 0
+        self._sach_cached_residual_diag: Optional[torch.Tensor] = None
+        self._sach_cached_residual_trace: Optional[float] = None
+        self._sach_refresh_count: int = 0
+        self._sach_total_calls: int = 0
+        self._sach_last_drift: float = 0.0
+
+    @staticmethod
+    def _flatten_tensor_list(tensors: List[torch.Tensor]) -> torch.Tensor:
+        return torch.cat([t.reshape(-1) for t in tensors], dim=0)
+
+    @staticmethod
+    def _unflatten_tensor_list(flat: torch.Tensor, templates: List[torch.Tensor]) -> List[torch.Tensor]:
+        out: List[torch.Tensor] = []
+        offset = 0
+        for t in templates:
+            n = t.numel()
+            out.append(flat[offset: offset + n].view_as(t))
+            offset += n
+        return out
+
+    def _get_outer_secant_pairs(self, device: torch.device, dtype: torch.dtype) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        state = self.outer_optimizer.state.get("global_state", {})
+        old_stps = state.get("old_stps", [])
+        old_dirs = state.get("old_dirs", [])
+        pairs: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        for s_vec, y_vec in zip(old_stps, old_dirs):
+            if s_vec is None or y_vec is None:
+                continue
+            s = s_vec.detach().to(device=device, dtype=dtype).reshape(-1)
+            y = y_vec.detach().to(device=device, dtype=dtype).reshape(-1)
+            if s.numel() != y.numel() or s.numel() == 0:
+                continue
+            pairs.append((s, y))
+        return pairs
+
+    def _sach_should_refresh(self, topology_drift: float) -> bool:
+        if self._sach_probe_cache is None:
+            return True
+        if self._sach_cached_residual_diag is None:
+            return True
+        if self._sach_cache_age >= max(1, int(self.config.outer_sachpp_refresh_interval)):
+            return True
+        if topology_drift > float(self.config.outer_sachpp_drift_threshold):
+            return True
+        return False
+
+    def _sach_refresh_probes(self, dim: int, device: torch.device, dtype: torch.dtype) -> None:
+        m = max(1, int(self.config.outer_sachpp_probe_count))
+        raw = torch.randn((dim, m), device=device, dtype=dtype)
+        if bool(self.config.outer_sachpp_use_qr_probes) and m > 1:
+            q, _ = torch.linalg.qr(raw)
+            probes = q.transpose(0, 1).contiguous()
+        else:
+            denom = raw.norm(dim=0, keepdim=True).clamp_min(1e-8)
+            probes = (raw / denom).transpose(0, 1).contiguous()
+        self._sach_probe_cache = probes
+        self._sach_cache_age = 0
+        self._sach_refresh_count += 1
+
+    def _sach_lowrank_terms(
+        self,
+        secant_pairs: List[Tuple[torch.Tensor, torch.Tensor]],
+        dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, float]:
+        eps = float(self.config.outer_sachpp_epsilon)
+        diag = torch.zeros(dim, device=device, dtype=dtype)
+        tr = 0.0
+        for s_k, y_k in secant_pairs:
+            curv = float(torch.dot(s_k, y_k).item())
+            if curv <= eps:
+                continue
+            diag = diag + (y_k * y_k) / curv
+            tr += float(torch.dot(y_k, y_k).item() / curv)
+        return diag, tr
+
+    def _sach_lowrank_hvp(
+        self,
+        z_flat: torch.Tensor,
+        secant_pairs: List[Tuple[torch.Tensor, torch.Tensor]],
+    ) -> torch.Tensor:
+        eps = float(self.config.outer_sachpp_epsilon)
+        out = torch.zeros_like(z_flat)
+        for s_k, y_k in secant_pairs:
+            curv = float(torch.dot(s_k, y_k).item())
+            if curv <= eps:
+                continue
+            out = out + y_k * (torch.dot(y_k, z_flat) / curv)
+        return out
+
+    def _precondition_hypergradients_sach(
+        self,
+        val_loss: torch.Tensor,
+        hypergrads: List[torch.Tensor],
+        params: List[torch.Tensor],
+        topology_drift: float = 0.0,
+    ) -> Tuple[List[torch.Tensor], float]:
+        self._sach_total_calls += 1
+        self._sach_last_drift = float(topology_drift)
+
+        hvp_fn = self._build_hvp_fn(val_loss, params)
+        flat_grads = self._flatten_tensor_list(hypergrads)
+        dim = int(flat_grads.numel())
+
+        def flat_hvp(z_flat: torch.Tensor) -> torch.Tensor:
+            z_list = self._unflatten_tensor_list(z_flat, params)
+            hz_list = hvp_fn(z_list)
+            return self._flatten_tensor_list(hz_list)
+
+        secant_pairs = self._get_outer_secant_pairs(device=flat_grads.device, dtype=flat_grads.dtype)
+        diag_lowrank, tr_lowrank = self._sach_lowrank_terms(
+            secant_pairs,
+            dim=dim,
+            device=flat_grads.device,
+            dtype=flat_grads.dtype,
+        )
+
+        if self._sach_should_refresh(topology_drift):
+            self._sach_refresh_probes(dim=dim, device=flat_grads.device, dtype=flat_grads.dtype)
+            probes = self._sach_probe_cache
+            assert probes is not None
+            residual_diag = torch.zeros(dim, device=flat_grads.device, dtype=flat_grads.dtype)
+            residual_trace = 0.0
+            for i in range(probes.size(0)):
+                z = probes[i]
+                hz_full = flat_hvp(z)
+                hz_low = self._sach_lowrank_hvp(z, secant_pairs)
+                hz_res = hz_full - hz_low
+                residual_diag = residual_diag + z * hz_res
+                residual_trace += float(torch.dot(z, hz_res).item())
+            m = float(max(1, probes.size(0)))
+            self._sach_cached_residual_diag = residual_diag / m
+            self._sach_cached_residual_trace = residual_trace / m
+        self._sach_cache_age += 1
+
+        residual_diag = self._sach_cached_residual_diag
+        if residual_diag is None:
+            residual_diag = torch.zeros(dim, device=flat_grads.device, dtype=flat_grads.dtype)
+
+        diag_full = diag_lowrank + residual_diag
+        denom = torch.abs(diag_full) + float(self.config.outer_sachpp_epsilon)
+        precond_flat = torch.nan_to_num(flat_grads / denom, nan=0.0, posinf=1.0, neginf=-1.0)
+        precond_grads = self._unflatten_tensor_list(precond_flat, hypergrads)
+        grad_norm = float(sum(g.norm().item() for g in precond_grads if g is not None))
+
+        if bool(self.config.outer_hutchpp_trace_enabled):
+            tr_res = float(self._sach_cached_residual_trace or 0.0)
+            self.hutch_trace_history.append(float(tr_lowrank + tr_res))
+
+        return precond_grads, grad_norm
 
     @staticmethod
     def _build_hvp_fn(
@@ -234,95 +387,38 @@ class BilevelOptimizer:
                 self._hp_updates_frozen = True
         return delta_norm
 
-    def hutch_trace_estimate(
-        self,
-        hvp_fn: Callable[[List[torch.Tensor]], List[torch.Tensor]],
-        params: List[torch.Tensor],
-        m: int,
-    ) -> torch.Tensor:
-        """
-        Hutch++-style stochastic trace estimator.
-
-        Applied exclusively to meta-Hessian H_lambda. See Report Section 4.4.
-        Reference: Meyer, Musco, Musco & Woodruff (2021), SIMAX.
-        Note: estimates scalar Tr(H), not diagonal diag(H).
-        """
-        trace_sum: Optional[torch.Tensor] = None
-        for _ in range(max(1, int(m))):
-            z_list = [torch.randn_like(p) for p in params]
-            hz_list = hvp_fn(z_list)
-            contrib = torch.zeros((), device=params[0].device, dtype=params[0].dtype)
-            for z, hz in zip(z_list, hz_list):
-                contrib = contrib + torch.sum(z * hz)
-            if trace_sum is None:
-                trace_sum = contrib
-            else:
-                trace_sum = trace_sum + contrib
-
-        if trace_sum is None:
-            return torch.zeros((), device=params[0].device, dtype=params[0].dtype)
-        return trace_sum / float(max(1, int(m)))
-
-    def hutchinson_diagonal_estimate(
-        self,
-        hvp_fn: Callable[[List[torch.Tensor]], List[torch.Tensor]],
-        params: List[torch.Tensor],
-    ) -> List[torch.Tensor]:
-        """Rademacher Hutchinson estimator for diagonal diag(H_lambda)."""
-        eps = float(self.config.outer_hutchpp_eps)
-        m = max(1, int(self.config.outer_hutchpp_samples))
-
-        diag_accum: List[torch.Tensor] = [
-            torch.zeros_like(p, dtype=p.dtype, device=p.device) for p in params
-        ]
-
-        for _ in range(m):
-            z_list: List[torch.Tensor] = []
-            for p in params:
-                z = torch.randint(0, 2, p.shape, device=p.device, dtype=torch.int8)
-                z = z.to(dtype=p.dtype) * 2.0 - 1.0
-                z_list.append(z)
-
-            hvp = hvp_fn(z_list)
-            for i, (hvi, zi) in enumerate(zip(hvp, z_list)):
-                diag_accum[i] = diag_accum[i] + zi * hvi
-
-        diag_est = []
-        for d in diag_accum:
-            d = d / float(m)
-            d = torch.abs(d) + eps
-            diag_est.append(d)
-
-        return diag_est
-
     def _precondition_hypergradients_hutchinson(
         self,
         val_loss: torch.Tensor,
         hypergrads: List[torch.Tensor],
         params: List[torch.Tensor],
     ) -> Tuple[List[torch.Tensor], float]:
-        """Apply diagonal Hutchinson preconditioning; keep scalar trace estimate separate."""
+        """Apply diagonal Hutchinson preconditioning via a flat-vector operator."""
         hvp_fn = self._build_hvp_fn(val_loss, params)
-
-        if self.config.outer_hutchpp_trace_enabled:
-            trace_est = self.hutch_trace_estimate(
-                hvp_fn=hvp_fn,
-                params=params,
-                m=max(1, int(self.config.outer_hutchpp_samples)),
-            )
-            self.hutch_trace_history.append(float(trace_est.detach().item()))
 
         if not self.config.outer_hutchpp_diagonal_precondition_enabled:
             grad_norm = float(sum(g.norm().item() for g in hypergrads if g is not None))
             return hypergrads, grad_norm
 
-        diag_est = self.hutchinson_diagonal_estimate(hvp_fn, params)
-        precond = []
-        for g, d in zip(hypergrads, diag_est):
-            d_safe = torch.nan_to_num(d, nan=float(self.config.outer_hutchpp_eps), posinf=1e6, neginf=float(self.config.outer_hutchpp_eps))
-            d_safe = torch.clamp(d_safe, min=float(self.config.outer_hutchpp_eps))
-            pre = torch.nan_to_num(g / d_safe, nan=0.0, posinf=1.0, neginf=-1.0)
-            precond.append(pre)
+        # ADDS: single canonical diagonal preconditioner through core.outer_precondition.
+        # REMOVES: local scalar-trace helper and per-parameter diagonal estimator methods.
+        flat_grads = self._flatten_tensor_list(hypergrads)
+        dim = int(flat_grads.numel())
+
+        def flat_h_fn(v_flat: torch.Tensor) -> torch.Tensor:
+            v_list = self._unflatten_tensor_list(v_flat, params)
+            hv_list = hvp_fn(v_list)
+            return self._flatten_tensor_list(hv_list)
+
+        precond_flat = outer_precondition(
+            hypgrad=flat_grads,
+            H_fn=flat_h_fn,
+            dim=dim,
+            n_probes=max(1, int(self.config.outer_hutchpp_samples)),
+            eps=float(self.config.outer_hutchpp_eps),
+        )
+        precond_flat = torch.nan_to_num(precond_flat, nan=0.0, posinf=1.0, neginf=-1.0)
+        precond = self._unflatten_tensor_list(precond_flat, hypergrads)
         grad_norm = float(sum(g.norm().item() for g in precond if g is not None))
         return precond, grad_norm
 
@@ -504,6 +600,9 @@ class BilevelOptimizer:
             steps=self.config.inner_steps,
             create_graph=create_graph,
             initial_params=initial_params,
+            # ADDS: explicit inner-loop L2 regularization coefficient from config.
+            # REMOVES: implicit no-regularization call path for inner objective.
+            l2_inner_reg=self.config.l2_inner_reg,
             enable_sensitivity_debug=False,
         )
         return self._call_objective(
@@ -594,6 +693,9 @@ class BilevelOptimizer:
             steps=self.config.inner_steps,
             create_graph=True,
             initial_params=initial_params,
+            # ADDS: explicit inner-loop L2 regularization coefficient from config.
+            # REMOVES: implicit no-regularization call path for inner objective.
+            l2_inner_reg=self.config.l2_inner_reg,
             enable_sensitivity_debug=True,
         )
 
@@ -638,7 +740,7 @@ class BilevelOptimizer:
         val_data: Any,
         use_dashboard: bool = True,
         run_validity_checks: bool = True,
-        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], Optional[bool]]] = None,
     ) -> Dict[str, Any]:
         """
         Run the full bilevel optimization loop.
@@ -669,7 +771,7 @@ class BilevelOptimizer:
                 latest_state: Dict[str, Any] = {}
                 hp_before = [p.detach().clone() for p in self.hyperparams.parameters()]
 
-                if config.outer_hutchpp_precondition_enabled:
+                if config.outer_hutchpp_precondition_enabled or config.outer_sachpp_enabled:
                     state = self._evaluate_bilevel_state(
                         model,
                         train_fn,
@@ -680,11 +782,25 @@ class BilevelOptimizer:
                     )
                     params = list(self.hyperparams.parameters())
                     eta = float(self.config.lbfgs_lr)
-                    precond_grads, _ = self._precondition_hypergradients_hutchinson(
-                        state["val_loss"],
-                        state["hypergradients"],
-                        params,
-                    )
+                    topology_drift = 0.0
+                    curr_val_loss = float(state["val_loss"].detach().item())
+                    if self.loss_history:
+                        prev_val_loss = float(self.loss_history[-1])
+                        topology_drift = abs(curr_val_loss - prev_val_loss) / (abs(prev_val_loss) + 1e-8)
+
+                    if bool(config.outer_sachpp_enabled):
+                        precond_grads, _ = self._precondition_hypergradients_sach(
+                            state["val_loss"],
+                            state["hypergradients"],
+                            params,
+                            topology_drift=topology_drift,
+                        )
+                    else:
+                        precond_grads, _ = self._precondition_hypergradients_hutchinson(
+                            state["val_loss"],
+                            state["hypergradients"],
+                            params,
+                        )
                     sanitized_grads, recovered = self._sanitize_hypergradients(
                         precond_grads,
                         fallback=state["hypergradients"],
@@ -826,7 +942,7 @@ class BilevelOptimizer:
                         )
 
                 if progress_callback is not None:
-                    progress_callback(
+                    stop_requested = bool(progress_callback(
                         {
                             "iteration": outer_iter + 1,
                             "total_iterations": config.outer_steps,
@@ -840,7 +956,13 @@ class BilevelOptimizer:
                             "sensitivity_debug": sensitivity_debug,
                             "hybrid_shard": hybrid_shard,
                         }
-                    )
+                    ))
+                    if stop_requested:
+                        break
+
+                # If plateau logic froze HP updates, terminate outer loop early.
+                if self._hp_updates_frozen:
+                    break
 
         finally:
             if use_dashboard:

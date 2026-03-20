@@ -42,6 +42,9 @@ class TaLBFGSConfig:
     outer_steps: int = 50
     inner_optimizer: str = "SGD"  # inner loop optimizer for model weights
     inner_lr: float = 1e-3
+    # ADDS: explicit inner-loop L2 regularization for IFT stability.
+    # REMOVES: implicit zero-regularization assumption in inner objective construction.
+    l2_inner_reg: float = 1e-4
 
     # ── Inner Secant-Topology (Persistent Geometry) ─────────────────
     inner_secant_topology_enabled: bool = True
@@ -70,10 +73,18 @@ class TaLBFGSConfig:
 
     # ── Outer Hutch++ Preconditioning (Strict Bilevel Stability) ─────
     outer_hutchpp_precondition_enabled: bool = True
-    outer_hutchpp_samples: int = 5
-    outer_hutchpp_eps: float = 1e-8
+    outer_hutchpp_samples: int = 10
+    outer_hutchpp_eps: float = 1e-5
     outer_hutchpp_trace_enabled: bool = True
     outer_hutchpp_diagonal_precondition_enabled: bool = True
+
+    # ── Outer SACH++ (Secant-Anchored Cached Hutch++) ────────────────
+    outer_sachpp_enabled: bool = True
+    outer_sachpp_probe_count: int = 1
+    outer_sachpp_refresh_interval: int = 10
+    outer_sachpp_drift_threshold: float = 0.05
+    outer_sachpp_epsilon: float = 1e-4
+    outer_sachpp_use_qr_probes: bool = True
 
     # ── Evaluation / Diagnostics Integrity ────────────────────────────
     strict_optimizer_label_binding: bool = True

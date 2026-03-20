@@ -37,3 +37,17 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["ta_lbfgs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_phase*.py"]
+python_functions = ["test_*"]
+markers = [
+    "phase0: codebase structure audit",
+    "phase1: P0 mathematical fixes",
+    "phase2: new topology files",
+    "phase3: parameter dispatch",
+    "phase4: chain topology",
+    "phase5: integration and equilibrium",
+]
+addopts = "-v --tb=short --strict-markers"

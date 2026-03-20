@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 ta_lbfgs/__init__.py
 ta_lbfgs/config.py
@@ -16,6 +17,7 @@ ta_lbfgs/dashboard/__init__.py
 ta_lbfgs/dashboard/landscape_viz.py
 ta_lbfgs/dashboard/live_dashboard.py
 ta_lbfgs/dashboard/online_rsvd.py
+ta_lbfgs/dashboard/server.py
 ta_lbfgs/dashboard/sparkline.py
 ta_lbfgs/dashboard/textual_dashboard.py
 ta_lbfgs/topology/__init__.py
@@ -28,6 +30,12 @@ ta_lbfgs/training/data_preprocessing.py
 ta_lbfgs/training/inner_loop.py
 ta_lbfgs/training/interceptor.py
 ta_lbfgs/utils/__init__.py
+ta_lbfgs/utils/kfac.py
 ta_lbfgs/utils/vllm_client.py
 ta_lbfgs/utils/vram.py
-tests/test_online_rsvd.py
+tests/test_phase0_audit.py
+tests/test_phase1_p0_fixes.py
+tests/test_phase2_topology_files.py
+tests/test_phase3_dispatch.py
+tests/test_phase4_chain.py
+tests/test_phase5_integration.py

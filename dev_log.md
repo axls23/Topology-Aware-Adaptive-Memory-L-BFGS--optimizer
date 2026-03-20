@@ -236,3 +236,100 @@
     - ta-LBFGS best loss: `4.861778`
     - Elapsed: `74.84s`
     - MVP-4 report generated successfully.
+
+## 2026-03-20
+
+### Mission Track: ta-LBFGS Topology Integration + Test Realignment
+
+### Production Code Progress
+
+#### Phase 1A: Hypergradient Neumann Path (Completed)
+- Updated `ta_lbfgs/core/hypergradient.py`:
+  - Replaced legacy Neumann path with spectral-guarded implementation:
+    - `_spectral_guard(...)`
+    - `neumann_hypergradient(...)`
+  - Added flat-vector bridge helpers for list-based HVP integration.
+  - Removed silent non-finite fallback in Neumann branch; now raises explicit floating-point errors.
+
+#### Phase 1B: Inner-Loop L2 Regularization (Completed)
+- Updated `ta_lbfgs/config.py`:
+  - Added explicit `l2_inner_reg: float = 1e-4` in bilevel config surface.
+- Updated `ta_lbfgs/training/inner_loop.py`:
+  - Replaced raw inner loss with regularized objective:
+    - `base_loss + l2_inner_reg * sum(p.norm() ** 2 for p in adapted_params.values())`
+- Updated `ta_lbfgs/training/bilevel.py`:
+  - Wired `l2_inner_reg` into both inner-loop call paths.
+
+#### Phase 1C: Saddle Detection + Escape (Completed)
+- Updated `ta_lbfgs/topology/saddle.py`:
+  - Added `is_saddle_point(...)` Lanczos-style min-eigen probe.
+  - Added `escape_saddle(...)` eigenvector-directed perturbation.
+  - Replaced random orthogonal perturbation core behavior.
+- Updated `ta_lbfgs/core/lbfgs.py`:
+  - `_inject_perturbation(...)` now probes with two-loop handle and applies eigenvector-directed escape.
+
+#### Phase 1D: Outer Diagonal Preconditioning (Completed)
+- Updated `ta_lbfgs/core/hypergradient.py`:
+  - Added `hutchinson_diagonal(...)` and `outer_precondition(...)`.
+- Updated `ta_lbfgs/training/bilevel.py`:
+  - Removed local scalar-trace preconditioner helpers.
+  - Switched to flat-vector diagonal precondition route through `outer_precondition(...)`.
+
+#### Phase 1E: Adaptive Memory + Pair Validity Gate (Completed)
+- Updated `ta_lbfgs/topology/adaptive_memory.py`:
+  - Added `compute_window(...)` log2-clamped mapping.
+  - Added `AitkenAccelerator`.
+  - Kept `compute_memory_size(...)` as compatibility wrapper delegating to `compute_window(...)`.
+- Updated `ta_lbfgs/core/baseline_lbfgs.py`:
+  - Added `EPS_REL = 0.01`.
+  - Added `_is_valid_pair(...)` with relative secant threshold.
+  - Replaced simple `ys > 0` acceptance gate in curvature history update.
+
+### Test Infrastructure Realignment Progress
+
+#### Legacy Suite Replaced with Phase-Based Suite (Completed)
+- Removed:
+  - `tests/test_bilevel_validity.py`
+  - `tests/test_online_rsvd.py`
+  - `tests/__init__.py`
+- Added:
+  - `tests/conftest.py`
+  - `tests/test_phase0_audit.py`
+  - `tests/test_phase1_p0_fixes.py`
+  - `tests/test_phase2_topology_files.py`
+  - `tests/test_phase3_dispatch.py`
+  - `tests/test_phase4_chain.py`
+  - `tests/test_phase5_integration.py`
+  - `tests/BASELINE_LOC.txt` (current baseline: `5470`)
+- Updated `pyproject.toml` with pytest phase discovery and marker config.
+
+#### Test Run Status
+- Phase 0 gate run:
+  - `3 passed`, `1 skipped` (best-effort orphan analysis skip).
+- Phase 1 run:
+  - `9 passed`, `1 skipped`.
+- Full suite run (latest):
+  - `14 passed`, `2 skipped`, `1 xfailed`, `28 failed`, `8 errors`.
+
+### Current Blocking Gaps to Reach End Goal
+- Missing Phase 2 modules:
+  - `ta_lbfgs/topology/attention_topo.py`
+  - `ta_lbfgs/topology/moe_topo.py`
+  - `ta_lbfgs/utils/kfac.py`
+- Missing Phase 3 dispatch API in `ta_lbfgs/core/lbfgs.py`:
+  - `PARAM_GROUP_TYPES`
+  - `classify_param_group(...)`
+  - `AdamDiagPreconditioner`
+  - `should_freeze_in_inner_loop(...)`
+- Missing Phase 4 module:
+  - `ta_lbfgs/topology/chain_topo.py`
+- Missing integration class export expected by Phase 5 tests:
+  - `TaLBFGS` from `ta_lbfgs/core/lbfgs.py`
+- Equilibrium ledger check currently failing in tests:
+  - Net LOC delta `+1007` vs target `<= +50`.
+
+### Immediate Next Execution Plan
+1. Implement Phase 2 topology files (`attention_topo.py`, `moe_topo.py`, `utils/kfac.py`).
+2. Implement Phase 3 dispatch surfaces in `core/lbfgs.py` and freeze-guard re-export in `training/inner_loop.py`.
+3. Implement Phase 4 `chain_topo.py`.
+4. Re-run `pytest tests -v` and update failure ledger.

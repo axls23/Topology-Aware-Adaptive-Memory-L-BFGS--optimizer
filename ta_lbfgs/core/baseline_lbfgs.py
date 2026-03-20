@@ -17,6 +17,9 @@ from torch.optim import Optimizer
 from typing import Dict, Optional, Tuple
 
 
+EPS_REL = 0.01
+
+
 def is_legal(v: torch.Tensor) -> bool:
     """Check that tensor contains no NaN or Inf values."""
     return not torch.isnan(v).any() and not torch.isinf(v).any()
@@ -587,6 +590,12 @@ class FullBatchLBFGS(Optimizer):
 
         return Bs
 
+    # ADDS: stricter relative secant-pair validity gate for curvature history.
+    # REMOVES: simple y^T s > 0 acceptance rule in curvature_update().
+    def _is_valid_pair(self, s: torch.Tensor, y: torch.Tensor) -> bool:
+        dot = (y @ s).item()
+        return dot > EPS_REL * y.norm().item() * s.norm().item()
+
     def curvature_update(self, flat_grad, eps=1e-2, damping=False):
         """
         Update curvature pair history with new gradient information.
@@ -654,7 +663,7 @@ class FullBatchLBFGS(Optimizer):
         else:
             alpha_k = torch.tensor(1.0, device=ys.device, dtype=ys.dtype)
 
-        if ys > 1e-10:
+        if self._is_valid_pair(s, y):
             # Accept curvature pair
             if len(old_dirs) == history_size:
                 old_dirs.pop(0)

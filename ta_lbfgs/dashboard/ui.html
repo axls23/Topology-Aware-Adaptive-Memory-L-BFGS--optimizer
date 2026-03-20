@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ta-LBFGS Optimizer Dashboard</title>
+  <style>
+    :root {
+      --bg: #304ba4;
+      --surface: #ffffff;
+      --surface-2: #f3f4ea;
+      --ink: #172222;
+      --muted: #536063;
+      --line: #d8ddd2;
+      --good: #1f8b4c;
+      --warn: #b07a13;
+      --bad: #b43e28;
+      --purple: #7c4ca5;
+      --teal: #1d8f8a;
+      --cold: #8f989b;
+      --shadow: 0 8px 30px rgba(23, 34, 34, 0.06);
+      --radius: 14px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(900px 240px at 15% 5%, #dbe8d8 0, transparent 60%),
+        radial-gradient(800px 220px at 90% 15%, #e8ded2 0, transparent 55%),
+        var(--bg);
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      line-height: 1.35;
+    }
+
+    .topbar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      background: rgba(255, 255, 255, 0.92);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(6px);
+      z-index: 10;
+    }
+
+    .status-pill {
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      font-size: 12px;
+      background: var(--surface-2);
+    }
+
+    .sidebar {
+      position: fixed;
+      top: 54px;
+      left: 0;
+      bottom: 0;
+      width: 200px;
+      border-right: 1px solid var(--line);
+      background: linear-gradient(180deg, #eff1e8, #f7f8f2);
+      padding: 14px 10px;
+      overflow-y: auto;
+    }
+
+    .sidebar h1 {
+      margin: 0 0 12px;
+      font-family: "Space Grotesk", "Segoe UI", sans-serif;
+      font-size: 16px;
+      letter-spacing: 0.02em;
+    }
+
+    .sidebar a {
+      display: block;
+      margin: 8px 0;
+      padding: 6px 8px;
+      border-radius: 8px;
+      color: var(--ink);
+      text-decoration: none;
+      border: 1px solid transparent;
+    }
+
+    .sidebar a:hover {
+      border-color: var(--line);
+      background: #fff;
+    }
+
+    .main {
+      margin-left: 200px;
+      margin-top: 54px;
+      padding: 14px;
+      height: calc(100vh - 54px);
+      overflow-y: auto;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+
+    .panel h2 {
+      margin: 0 0 10px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #314243;
+    }
+
+    .metric-strip {
+      position: sticky;
+      top: 6px;
+      z-index: 8;
+      background: rgba(246, 247, 242, 0.85);
+      backdrop-filter: blur(2px);
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(140px, 1fr));
+      gap: 8px;
+    }
+
+    .metric-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface-2);
+      padding: 8px;
+    }
+
+    .metric-card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+    .metric-card .value { font-size: 18px; font-weight: 700; margin-top: 2px; }
+
+    .heatmap-grid {
+      display: grid;
+      gap: 4px;
+      user-select: none;
+    }
+
+    .heat-cell {
+      border-radius: 6px;
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      height: 28px;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform .12s ease;
+      color: #102227;
+      font-weight: 600;
+    }
+
+    .heat-cell:hover { transform: scale(1.02); }
+    .k-green { background: #bde8c4; }
+    .k-amber { background: #f7dfaa; }
+    .k-red { background: #f5b9ad; }
+
+    .legend-line {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .inline-overlay {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      background: #fafbf6;
+      display: none;
+    }
+
+    .overlay-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+      font-weight: 600;
+      font-size: 12px;
+    }
+
+    .close-btn {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      width: 22px;
+      height: 22px;
+      cursor: pointer;
+    }
+
+    .overlay-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+
+    .overlay-table th, .overlay-table td {
+      border-bottom: 1px solid var(--line);
+      padding: 4px 5px;
+      text-align: right;
+    }
+
+    .overlay-table th:first-child, .overlay-table td:first-child { text-align: left; }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);
+      gap: 12px;
+    }
+
+    .expert-row {
+      display: grid;
+      grid-template-columns: 58px 1fr 56px 58px;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 6px;
+      font-size: 12px;
+    }
+
+    .load-track {
+      height: 10px;
+      background: #e4e8df;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .load-fill { height: 100%; border-radius: 999px; }
+    .load-high { background: var(--purple); }
+    .load-mid { background: var(--teal); }
+    .load-low { background: var(--cold); }
+
+    .badge {
+      text-align: center;
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #e8ece1;
+    }
+
+    .badge-max { background: #f0c774; font-weight: 700; }
+    .badge-min { background: #d6d9d7; }
+
+    .summary-line {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .spark-wrap {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      background: #fcfcf8;
+    }
+
+    svg.spark { width: 100%; height: 62px; }
+
+    .delta-line { font-size: 10px; color: var(--muted); margin-top: 4px; }
+
+    .segbar {
+      height: 28px;
+      border-radius: 999px;
+      overflow: hidden;
+      display: flex;
+      border: 1px solid var(--line);
+      background: #e6e8df;
+      font-size: 10px;
+      color: #132024;
+    }
+
+    .seg {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    .seg-reason { background: #c8b2dd; }
+    .seg-pivot { background: #f0c774; }
+    .seg-answer { background: #95d5d2; }
+    .seg-verify { background: #cfd4d4; }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .status-row {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px;
+      background: #fbfcf7;
+      font-size: 11px;
+    }
+
+    .status-row b { color: var(--muted); display: block; font-size: 10px; }
+
+    .events-list {
+      max-height: 180px;
+      overflow-y: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcf7;
+      padding: 8px;
+      font-size: 11px;
+    }
+
+    .event-item { margin-bottom: 6px; color: #334445; }
+
+    @media (max-width: 900px) {
+      .sidebar { width: 170px; }
+      .main { margin-left: 170px; }
+      .metrics { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+      .two-col { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 680px) {
+      .sidebar {
+        position: static;
+        width: 100%;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
+      .main {
+        margin-left: 0;
+        margin-top: 0;
+        height: auto;
+      }
+      .topbar {
+        position: static;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div><strong>ta-LBFGS Live Visualizer</strong></div>
+    <div id="runStatus" class="status-pill">status: initializing</div>
+  </header>
+
+  <aside class="sidebar">
+    <h1>Navigator</h1>
+    <a href="#panel-metrics">Metric Strip</a>
+    <a href="#panel-heatmap">Per-head kappa</a>
+    <a href="#panel-experts">Expert Routing</a>
+    <a href="#panel-loss">Val Loss Trajectory</a>
+    <a href="#panel-chain">Chain Topology</a>
+    <a href="#panel-events">Live Events</a>
+  </aside>
+
+  <main class="main">
+    <section id="panel-metrics" class="panel metric-strip">
+      <h2>Panel 1 - Metric Strip</h2>
+      <div class="metrics">
+        <div class="metric-card"><div class="label">val_loss</div><div id="mLoss" class="value">0.0000</div></div>
+        <div class="metric-card"><div class="label">outer_step</div><div id="mStep" class="value">0 / 0</div></div>
+        <div class="metric-card"><div class="label">mean_kappa</div><div id="mKappa" class="value">0</div></div>
+        <div class="metric-card"><div class="label">topology_valid</div><div id="mTopo" class="value">0% valid</div></div>
+      </div>
+    </section>
+
+    <section id="panel-heatmap" class="panel">
+      <h2>Panel 2 - Per-head kappa Heatmap</h2>
+      <div id="heatmap" class="heatmap-grid"></div>
+      <div id="headOverlay" class="inline-overlay"></div>
+      <div class="legend-line">
+        Green: kappa < 100 (banded Hessian) | Amber: 100-10k (K-FAC) | Red: >= 10k (K-FAC + Aitken)
+      </div>
+    </section>
+
+    <section class="two-col">
+      <section id="panel-experts" class="panel">
+        <h2>Panel 3 - Expert Routing</h2>
+        <div id="expertRows"></div>
+        <div id="expertSummary" class="summary-line">0 experts active this step · 0 buffers expired (TTL)</div>
+      </section>
+
+      <section id="panel-loss" class="panel">
+        <h2>Panel 4 - Val Loss Trajectory</h2>
+        <div class="spark-wrap">
+          <svg class="spark" viewBox="0 0 200 56" preserveAspectRatio="none">
+            <polyline id="lossLine" fill="none" stroke="#246f69" stroke-width="1.6" points="" />
+            <g id="eventLines"></g>
+          </svg>
+        </div>
+        <div class="delta-line" id="deltaLoss">Delta loss last 5 steps: 0.000</div>
+      </section>
+    </section>
+
+    <section id="panel-chain" class="panel">
+      <h2>Panel 5 - Chain Topology</h2>
+      <div class="segbar" id="chainBar"></div>
+      <div class="status-grid" id="chainStatus"></div>
+    </section>
+
+    <section id="panel-events" class="panel">
+      <h2>Panel 6 - Event Feed</h2>
+      <div id="eventFeed" class="events-list"></div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      latest: null,
+      lossHistory: []
+    };
+
+    function kappaBandClass(v) {
+      if (v < 100) return "k-green";
+      if (v < 10000) return "k-amber";
+      return "k-red";
+    }
+
+    function formatKappaCell(v) {
+      if (v < 1000) return String(Math.round(v));
+      if (v >= 100000) return Math.round(v / 1000) + "k";
+      return (v / 1000).toFixed(1) + "k";
+    }
+
+    function formatSci(v) {
+      if (!isFinite(v) || v === 0) return "0";
+      const exp = Math.floor(Math.log10(Math.abs(v)));
+      const base = v / Math.pow(10, exp);
+      return `${base.toFixed(1)}×10${toSuperscript(exp)}`;
+    }
+
+    function toSuperscript(num) {
+      const map = {"-":"⁻", "0":"⁰", "1":"¹", "2":"²", "3":"³", "4":"⁴", "5":"⁵", "6":"⁶", "7":"⁷", "8":"⁸", "9":"⁹"};
+      return String(num).split("").map(ch => map[ch] || ch).join("");
+    }
+
+    function updateMetrics(run) {
+      document.getElementById("mLoss").textContent = (run.val_loss || 0).toFixed(4);
+      document.getElementById("mStep").textContent = `${run.outer_step || 0} / ${run.max_outer_steps || 0}`;
+      document.getElementById("mKappa").textContent = formatSci(run.mean_kappa || 0);
+      const topo = run.topology_valid_pct || 0;
+      const el = document.getElementById("mTopo");
+      el.textContent = `${Math.round(topo)}% valid`;
+      el.style.color = topo > 80 ? "var(--good)" : (topo >= 50 ? "var(--warn)" : "var(--bad)");
+      document.getElementById("runStatus").textContent = `status: ${run.status || "running"}`;
+    }
+
+    function renderHeatmap(heat) {
+      const root = document.getElementById("heatmap");
+      const layers = heat.num_layers || 0;
+      const heads = heat.heads_per_layer || 0;
+      root.style.gridTemplateColumns = `repeat(${Math.max(heads, 1)}, minmax(32px, 1fr))`;
+      root.innerHTML = "";
+
+      for (let i = 0; i < layers; i++) {
+        for (let j = 0; j < heads; j++) {
+          const v = (heat.kappa[i] && heat.kappa[i][j]) || 0;
+          const cell = document.createElement("button");
+          cell.className = `heat-cell ${kappaBandClass(v)}`;
+          cell.textContent = formatKappaCell(v);
+          cell.title = `layer ${i}, head ${j}, kappa ${v.toFixed(2)}`;
+          cell.onclick = () => requestHeadBuffer(i, j);
+          root.appendChild(cell);
+        }
+      }
+    }
+
+    async function requestHeadBuffer(layer, head) {
+      const overlay = document.getElementById("headOverlay");
+      const res = await fetch("/select_head", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({layer, head})
+      });
+      const detail = await res.json();
+      const pairs = detail.pairs || [];
+      let rows = "";
+      for (const p of pairs) {
+        rows += `<tr><td>${p.idx}</td><td>${p.s_norm.toFixed(4)}</td><td>${p.y_norm.toFixed(4)}</td><td>${p.ys.toExponential(2)}</td><td>${p.accepted ? "yes" : "no"}</td></tr>`;
+      }
+      if (!rows) rows = "<tr><td colspan='5'>no curvature pairs yet</td></tr>";
+      overlay.innerHTML = `
+        <div class="overlay-head">
+          <span>Head buffer: layer ${detail.layer}, head ${detail.head}</span>
+          <button class="close-btn" onclick="document.getElementById('headOverlay').style.display='none'">x</button>
+        </div>
+        <table class="overlay-table">
+          <thead><tr><th>pair</th><th>||s||</th><th>||y||</th><th>yTs</th><th>valid</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+      overlay.style.display = "block";
+    }
+
+    function renderExperts(experts) {
+      const rows = experts.rows || [];
+      const root = document.getElementById("expertRows");
+      root.innerHTML = "";
+      rows.forEach((e, idx) => {
+        const load = Math.max(0, Math.min(1, Number(e.load || 0)));
+        const klass = load > 0.7 ? "load-high" : (load >= 0.3 ? "load-mid" : "load-low");
+        const badgeClass = e.window_size === 20 ? "badge badge-max" : (e.window_size === 3 ? "badge badge-min" : "badge");
+        const row = document.createElement("div");
+        row.className = "expert-row";
+        row.innerHTML = `
+          <div>exp ${e.id ?? idx}</div>
+          <div class="load-track"><div class="load-fill ${klass}" style="width:${(load * 100).toFixed(1)}%"></div></div>
+          <div>${(load * 100).toFixed(1)}%</div>
+          <div class="${badgeClass}">m=${e.window_size || 3}</div>
+        `;
+        root.appendChild(row);
+      });
+      document.getElementById("expertSummary").textContent = `${experts.active_count || 0} experts active this step · ${experts.expired_ttl || 0} buffers expired (TTL)`;
+    }
+
+    function renderTrajectory(traj, run) {
+      const loss = traj.loss || [];
+      state.lossHistory = loss;
+      const poly = document.getElementById("lossLine");
+      if (!loss.length) {
+        poly.setAttribute("points", "");
+        return;
+      }
+      const min = Math.min(...loss);
+      const max = Math.max(...loss);
+      const span = (max - min) || 1;
+      const points = loss.map((v, i) => {
+        const x = (i / Math.max(loss.length - 1, 1)) * 200;
+        const y = 54 - ((v - min) / span) * 50;
+        return `${x.toFixed(2)},${y.toFixed(2)}`;
+      }).join(" ");
+      poly.setAttribute("points", points);
+
+      const eventsRoot = document.getElementById("eventLines");
+      eventsRoot.innerHTML = "";
+      const addMarker = (stepIdx, color) => {
+        const total = Math.max(run.max_outer_steps || loss.length, 1);
+        const x = (Math.max(0, stepIdx) / total) * 200;
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        line.setAttribute("x1", x.toFixed(2));
+        line.setAttribute("x2", x.toFixed(2));
+        line.setAttribute("y1", "2");
+        line.setAttribute("y2", "54");
+        line.setAttribute("stroke", color);
+        line.setAttribute("stroke-dasharray", "3,2");
+        line.setAttribute("stroke-width", "1");
+        eventsRoot.appendChild(line);
+      };
+
+      (traj.pivot_steps || []).forEach(s => addMarker(s, "#b43e28"));
+      (traj.spectral_guard_steps || []).forEach(s => addMarker(s, "#b07a13"));
+
+      const recent = loss.slice(-5);
+      const delta = recent.length >= 2 ? recent[recent.length - 1] - recent[0] : 0;
+      const line = document.getElementById("deltaLoss");
+      line.innerHTML = `Delta loss last 5 steps: <span style="color:${delta <= 0 ? "var(--good)" : "var(--bad)"}">${delta.toFixed(3)}</span>`;
+    }
+
+    function renderChain(chain) {
+      const seg = chain.segments || {};
+      const reason = Number(seg.reasoning || 0);
+      const pivot = Number(seg.pivot || 0);
+      const answer = Number(seg.answer || 0);
+      const verify = Number(seg.verify || 0);
+      const total = Math.max(reason + pivot + answer + verify, 1e-9);
+
+      const pct = v => (100 * (v / total)).toFixed(1);
+      const bar = document.getElementById("chainBar");
+      bar.innerHTML = `
+        <div class="seg seg-reason" style="width:${pct(reason)}%">reasoning ${pct(reason)}%</div>
+        <div class="seg seg-pivot" style="width:${pct(pivot)}%">pivot</div>
+        <div class="seg seg-answer" style="width:${pct(answer)}%">answer ${pct(answer)}%</div>
+        <div class="seg seg-verify" style="width:${pct(verify)}%">verify ${pct(verify)}%</div>
+      `;
+
+      const rows = chain.status_rows || {};
+      const mapping = [
+        ["current segment", rows.current_segment],
+        ["pivot index", rows.pivot_index],
+        ["reasoning tokens", rows.reasoning_tokens],
+        ["answer tokens", rows.answer_tokens],
+        ["verify tokens", rows.verify_tokens],
+        ["topology valid", rows.topology_valid ? "yes" : "no"]
+      ];
+      const grid = document.getElementById("chainStatus");
+      grid.innerHTML = mapping.map(([k, v]) => `<div class="status-row"><b>${k}</b>${v ?? "-"}</div>`).join("");
+    }
+
+    function renderEvents(events) {
+      const root = document.getElementById("eventFeed");
+      const recent = (events || []).slice(-40).reverse();
+      root.innerHTML = recent.map(e => `<div class="event-item">${e}</div>`).join("") || "<div class='event-item'>no events yet</div>";
+    }
+
+    function render(data) {
+      state.latest = data;
+      updateMetrics(data.run || {});
+      renderHeatmap(data.heatmap || {});
+      renderExperts(data.experts || {});
+      renderTrajectory(data.trajectory || {}, data.run || {});
+      renderChain(data.chain || {});
+      renderEvents(data.events || []);
+    }
+
+    const stream = new EventSource("/events");
+    stream.onmessage = (ev) => {
+      try {
+        render(JSON.parse(ev.data));
+      } catch (_) {}
+    };
+    stream.onerror = () => {
+      document.getElementById("runStatus").textContent = "status: reconnecting";
+    };
+
+    fetch("/state")
+      .then(r => r.json())
+      .then(render)
+      .catch(() => {});
+  </script>
+</body>
+</html>

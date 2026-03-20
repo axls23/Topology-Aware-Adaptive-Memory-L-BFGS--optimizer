@@ -13,6 +13,7 @@ Methods:
 
 import torch
 from typing import Callable, List, Optional, Tuple
+from math import prod
 
 
 def _tensor_list_all_finite(tensors: List[torch.Tensor]) -> bool:
@@ -135,41 +136,105 @@ def conjugate_gradient_solve(
     return x
 
 
-def neumann_series_approx(
-    hvp_fn: Callable[[List[torch.Tensor]], List[torch.Tensor]],
-    g: List[torch.Tensor],
+def _flatten_tensor_list(tensors: List[torch.Tensor]) -> Tuple[torch.Tensor, List[torch.Size]]:
+    flat = torch.cat([t.reshape(-1) for t in tensors], dim=0)
+    shapes = [t.shape for t in tensors]
+    return flat, shapes
+
+
+def _unflatten_tensor(flat: torch.Tensor, shapes: List[torch.Size]) -> List[torch.Tensor]:
+    chunks: List[torch.Tensor] = []
+    offset = 0
+    for shape in shapes:
+        n = prod(shape)
+        chunks.append(flat[offset: offset + n].reshape(shape))
+        offset += n
+    return chunks
+
+
+# ADDS: step-size stability guard for truncated Neumann inverse-HVP.
+# REMOVES: unconstrained alpha usage from old neumann_series_approx() in this file.
+def _spectral_guard(
+    H_fn: Callable[[torch.Tensor], torch.Tensor],
+    alpha: float,
+    n_probe: int = 3,
+    probe: Optional[torch.Tensor] = None,
+) -> float:
+    """Ensures alpha < 2/lambda_max(H) via power iteration."""
+    if probe is None:
+        probe = torch.randn(1)
+    v = probe.clone()
+    v = v / v.norm().clamp(min=1e-12)
+    lam_max = torch.tensor(0.0, device=v.device, dtype=v.dtype)
+    for _ in range(n_probe):
+        v = H_fn(v)
+        if not torch.isfinite(v).all():
+            raise FloatingPointError("Non-finite H_fn(v) in _spectral_guard")
+        v = v / v.norm().clamp(min=1e-12)
+    Hv = H_fn(v)
+    if not torch.isfinite(Hv).all():
+        raise FloatingPointError("Non-finite H_fn(v) in _spectral_guard Rayleigh quotient")
+    lam_max = torch.dot(v, Hv).abs()
+    if bool(alpha * lam_max >= 1.0):
+        denom = max(float(lam_max.detach().cpu()), 1e-6)
+        alpha = 0.9 / denom
+    return alpha
+
+
+# ADDS: spectral-guarded truncated Neumann inverse-HVP kernel.
+# REMOVES: old neumann_series_approx() recurrence and accumulator path in this file.
+def neumann_hypergradient(
+    H_fn: Callable[[torch.Tensor], torch.Tensor],
+    g_val: torch.Tensor,
+    alpha: float,
     K: int = 5,
-    alpha: float = 0.01,
-) -> List[torch.Tensor]:
-    """
-    Approximate H^{-1} * g using truncated Neumann series.
-
-    H^{-1} ≈ α Σ_{i=0}^{K} (I - αH)^i
-
-    This avoids explicitly forming or inverting the Hessian.
-
-    Args:
-        hvp_fn: Function that computes Hessian-vector products.
-        g: Gradient vectors to multiply by approximate inverse Hessian.
-        K: Number of Neumann series terms.
-        alpha: Scaling factor (should be < 1/λ_max(H) for convergence).
-
-    Returns:
-        Approximate inverse-HVP: H^{-1} * g.
-    """
-    # v_0 = g
-    v = [gi.clone() for gi in g]
-    result = [alpha * gi.clone() for gi in g]
-
+) -> torch.Tensor:
+    """Truncated Neumann. Caller must pass L2-regularized H_fn."""
+    alpha = _spectral_guard(H_fn, alpha, probe=g_val)
+    v = g_val.clone()
+    result = v.clone()
     for _ in range(K):
-        # v_{k+1} = v_k - α H v_k = (I - αH) v_k
-        Hv = hvp_fn(v)
-        v = [vi - alpha * hvi for vi, hvi in zip(v, Hv)]
+        Hv = H_fn(v)
+        if not torch.isfinite(Hv).all():
+            raise FloatingPointError("Non-finite H_fn(v) in neumann_hypergradient")
+        v = v - alpha * Hv
+        result = result + v
+    return alpha * result
 
-        # Accumulate: result += α * v_{k+1}
-        result = [ri + alpha * vi for ri, vi in zip(result, v)]
 
-    return result
+# ADDS: elementwise Hutchinson diagonal Hessian estimator for outer preconditioning.
+# REMOVES: scalar-trace-centric preconditioning dependence from outer-loop usage paths.
+def hutchinson_diagonal(
+    H_fn: Callable[[torch.Tensor], torch.Tensor],
+    dim: int,
+    n_probes: int = 10,
+) -> torch.Tensor:
+    """Diagonal Hessian estimator. Error ~O(1/sqrt(n_probes)) per element."""
+    probes = max(1, int(n_probes))
+
+    # Probe once to infer the target device/dtype from the Hessian-vector product.
+    z0 = (torch.randint(0, 2, (dim,), dtype=torch.int64).to(torch.float32) * 2 - 1)
+    hz0 = H_fn(z0)
+    diag = z0.to(dtype=hz0.dtype, device=hz0.device) * hz0
+
+    for _ in range(1, probes):
+        z = (torch.randint(0, 2, (dim,), device=hz0.device, dtype=torch.int64).to(hz0.dtype) * 2 - 1)
+        hz = H_fn(z)
+        diag.add_(z * hz)
+    return diag / float(probes)
+
+
+# ADDS: canonical outer-loop diagonal preconditioner built on Hutchinson diagonal.
+# REMOVES: ad-hoc scalar trace preconditioning as a curvature surrogate.
+def outer_precondition(
+    hypgrad: torch.Tensor,
+    H_fn: Callable[[torch.Tensor], torch.Tensor],
+    dim: int,
+    n_probes: int = 10,
+    eps: float = 1e-5,
+) -> torch.Tensor:
+    diag_H = hutchinson_diagonal(H_fn, dim, n_probes)
+    return hypgrad / diag_H.abs().clamp(min=eps)
 
 
 def implicit_differentiation(
@@ -230,11 +295,25 @@ def implicit_differentiation(
             # Fallback for mixed-precision or ill-conditioned hybrid shards.
             v_star = [g.detach().clone() for g in dLval_dw]
     elif method == "Neumann":
-        v_star = neumann_series_approx(
-            hvp_fn, list(dLval_dw), K=neumann_terms, alpha=neumann_alpha
+        # ADDS: vectorized H_fn bridge for spectral-guarded Neumann updates.
+        # REMOVES: silent non-finite fallback after old neumann_series_approx() in this file.
+        g_vec, g_shapes = _flatten_tensor_list(list(dLval_dw))
+
+        def flat_h_fn(v: torch.Tensor) -> torch.Tensor:
+            vec_list = _unflatten_tensor(v, g_shapes)
+            hv_list = hvp_fn(vec_list)
+            flat_hv, _ = _flatten_tensor_list(hv_list)
+            return flat_hv
+
+        v_vec = neumann_hypergradient(
+            flat_h_fn,
+            g_vec,
+            alpha=neumann_alpha,
+            K=neumann_terms,
         )
-        if not _tensor_list_all_finite(v_star):
-            v_star = [g.detach().clone() for g in dLval_dw]
+        if not torch.isfinite(v_vec).all():
+            raise FloatingPointError("Non-finite Neumann hypergradient vector")
+        v_star = _unflatten_tensor(v_vec, g_shapes)
     elif method == "direct":
         # Direct solve (only for small problems / debugging)
         v_star = list(dLval_dw)

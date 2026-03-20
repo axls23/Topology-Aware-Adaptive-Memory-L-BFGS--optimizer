@@ -1,6 +1,7 @@
 import os
 import math
 import time
+from collections import deque
 import numpy as np
 import torch
 import torch.nn as nn
@@ -470,6 +471,100 @@ class BaselineResult:
     metadata: Optional[Dict[str, Any]] = None
 
 
+@dataclass
+class ConvergenceConfig:
+    min_trials: int = 20
+    patience: int = 15
+    min_delta: float = 1e-4
+    window_size: int = 5
+
+
+class LossConvergenceMonitor:
+    """Stop when loss fails to improve by min_delta for patience steps."""
+
+    def __init__(self, cfg: ConvergenceConfig):
+        self.cfg = cfg
+        self.best_loss = float("inf")
+        self.no_improve_steps = 0
+        self.steps = 0
+
+    def update(self, loss: float) -> None:
+        self.steps += 1
+        if loss + self.cfg.min_delta < self.best_loss:
+            self.best_loss = float(loss)
+            self.no_improve_steps = 0
+            return
+        self.no_improve_steps += 1
+
+    def should_stop(self) -> bool:
+        if self.steps < self.cfg.min_trials:
+            return False
+        return self.no_improve_steps >= self.cfg.patience
+
+    def reason(self) -> str:
+        return (
+            "converged: no improvement >= "
+            f"{self.cfg.min_delta:.3e} for {self.no_improve_steps} steps"
+        )
+
+
+class MovingWindowConvergenceMonitor:
+    """Convergence on smoothed validation loss over a moving window."""
+
+    def __init__(self, cfg: ConvergenceConfig):
+        self.cfg = cfg
+        self.window = deque(maxlen=max(1, int(cfg.window_size)))
+        self.best_window_mean = float("inf")
+        self.no_improve_windows = 0
+        self.steps = 0
+
+    def update(self, loss: float) -> None:
+        self.steps += 1
+        self.window.append(float(loss))
+        if len(self.window) < self.window.maxlen:
+            return
+
+        window_mean = float(np.mean(np.array(self.window, dtype=np.float64)))
+        if window_mean + self.cfg.min_delta < self.best_window_mean:
+            self.best_window_mean = window_mean
+            self.no_improve_windows = 0
+            return
+        self.no_improve_windows += 1
+
+    def should_stop(self) -> bool:
+        if self.steps < self.cfg.min_trials:
+            return False
+        if len(self.window) < self.window.maxlen:
+            return False
+        return self.no_improve_windows >= self.cfg.patience
+
+    def reason(self) -> str:
+        return (
+            "converged on moving val window: no mean improvement >= "
+            f"{self.cfg.min_delta:.3e} for {self.no_improve_windows} windows "
+            f"(window={self.window.maxlen})"
+        )
+
+
+def _sample_prompt_batch(
+    prompt_pool: List[str],
+    batch_size: int,
+    iteration_idx: int,
+    stream_offset: int,
+) -> List[str]:
+    """Deterministically sample a prompt minibatch for one outer iteration."""
+    if not prompt_pool:
+        return []
+    size = max(1, int(batch_size))
+    rng_seed = 104729 + 1009 * int(iteration_idx) + 97 * int(stream_offset)
+    rng = np.random.default_rng(rng_seed)
+    if len(prompt_pool) >= size:
+        idx = rng.choice(len(prompt_pool), size=size, replace=False)
+    else:
+        idx = rng.choice(len(prompt_pool), size=size, replace=True)
+    return [prompt_pool[int(i)] for i in idx]
+
+
 def _set_layerwise_hyperparameters(
     hp_obj: DifferentiableHyperparameters,
     lrs: List[float],
@@ -579,10 +674,11 @@ def _summarize_success(
 
 
 def run_optuna_baseline(
-    n_trials=40,
+    n_trials=200,
     n_layers=4,
     output_dir="outputs",
     prompt_signatures: Optional[List[float]] = None,
+    convergence: Optional[ConvergenceConfig] = None,
 ) -> BaselineResult:
     print("=" * 60)
     print(f"  OPTIMIZATION BASELINE: Optuna (Bayesian / TPE)")
@@ -593,6 +689,9 @@ def run_optuna_baseline(
         prompt_signatures = build_prompt_signatures(n_trials=n_trials, seed=42)
     if len(prompt_signatures) < n_trials:
         raise ValueError("prompt_signatures must contain at least n_trials entries")
+
+    convergence_cfg = convergence or ConvergenceConfig()
+    monitor = LossConvergenceMonitor(convergence_cfg)
 
     loss_history = []
     hp_history = []
@@ -625,11 +724,18 @@ def run_optuna_baseline(
         # Record for visualization
         loss_history.append(loss)
         hp_history.append(hp_obj.as_float_dict())
+        monitor.update(loss)
         
         return loss
 
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=n_trials)
+
+    def _convergence_callback(study_obj: optuna.Study, _trial: optuna.trial.FrozenTrial) -> None:
+        if monitor.should_stop():
+            print(f"[EARLY STOP] Optuna {monitor.reason()} at trial {len(loss_history)}")
+            study_obj.stop()
+
+    study.optimize(objective, n_trials=n_trials, callbacks=[_convergence_callback])
     
     elapsed = time.perf_counter() - start
     variance = _loss_variance_summary(loss_history)
@@ -652,11 +758,12 @@ def run_optuna_baseline(
 
 
 def run_random_baseline(
-    n_trials: int = 40,
+    n_trials: int = 200,
     n_layers: int = 4,
     output_dir: str = "outputs",
     seed: Optional[int] = 42,
     prompt_signatures: Optional[List[float]] = None,
+    convergence: Optional[ConvergenceConfig] = None,
 ) -> BaselineResult:
     print("=" * 60)
     print("  OPTIMIZATION BASELINE: Random Search")
@@ -668,6 +775,7 @@ def run_random_baseline(
         prompt_signatures = build_prompt_signatures(n_trials=n_trials, seed=seed if seed is not None else 42)
     if len(prompt_signatures) < n_trials:
         raise ValueError("prompt_signatures must contain at least n_trials entries")
+    monitor = LossConvergenceMonitor(convergence or ConvergenceConfig())
 
     loss_history: List[float] = []
     hp_history: List[Dict[str, List[float]]] = []
@@ -688,6 +796,10 @@ def run_random_baseline(
         loss_history.append(loss)
         hp_history.append(hp_obj.as_float_dict())
         best_loss = min(best_loss, loss)
+        monitor.update(loss)
+        if monitor.should_stop():
+            print(f"[EARLY STOP] Random {monitor.reason()} at trial {trial_idx + 1}")
+            break
 
     elapsed = time.perf_counter() - start
     variance = _loss_variance_summary(loss_history)
@@ -719,10 +831,11 @@ def _decode_mixed_radix(index: int, base: int, dims: int) -> List[int]:
 
 
 def run_grid_baseline(
-    n_trials: int = 40,
+    n_trials: int = 200,
     n_layers: int = 4,
     output_dir: str = "outputs",
     prompt_signatures: Optional[List[float]] = None,
+    convergence: Optional[ConvergenceConfig] = None,
 ) -> BaselineResult:
     print("=" * 60)
     print("  OPTIMIZATION BASELINE: Grid Search")
@@ -733,6 +846,7 @@ def run_grid_baseline(
         prompt_signatures = build_prompt_signatures(n_trials=n_trials, seed=42)
     if len(prompt_signatures) < n_trials:
         raise ValueError("prompt_signatures must contain at least n_trials entries")
+    monitor = LossConvergenceMonitor(convergence or ConvergenceConfig())
 
     loss_history: List[float] = []
     hp_history: List[Dict[str, List[float]]] = []
@@ -766,6 +880,10 @@ def run_grid_baseline(
         loss_history.append(loss)
         hp_history.append(hp_obj.as_float_dict())
         best_loss = min(best_loss, loss)
+        monitor.update(loss)
+        if monitor.should_stop():
+            print(f"[EARLY STOP] Grid {monitor.reason()} at trial {i + 1}")
+            break
 
     elapsed = time.perf_counter() - start
     variance = _loss_variance_summary(loss_history)
@@ -788,11 +906,12 @@ def run_grid_baseline(
 
 
 def run_ta_lbfgs_baseline(
-    n_trials: int = 40,
+    n_trials: int = 200,
     n_layers: int = 4,
     output_dir: str = "outputs",
     prompt_signatures: Optional[List[float]] = None,
     ta_overrides: Optional[Dict[str, object]] = None,
+    convergence: Optional[ConvergenceConfig] = None,
     real_model_objective: bool = False,
     hf_model_id: str = "Qwen/Qwen2.5-0.5B",
     hf_local_path: Optional[str] = None,
@@ -801,7 +920,7 @@ def run_ta_lbfgs_baseline(
     dataset_prompts: Optional[List[str]] = None,
 ) -> BaselineResult:
     print("=" * 60)
-    mode_name = "Real HF Model Objective" if real_model_objective else "Strict Bilevel + Hutch++"
+    mode_name = "Real HF Model Objective" if real_model_objective else "Strict Bilevel + SACH++"
     print(f"  OPTIMIZATION BASELINE: ta-LBFGS ({mode_name})")
     print("=" * 60)
 
@@ -824,21 +943,51 @@ def run_ta_lbfgs_baseline(
         inner_secant_top_k=16,
         inner_secant_percentile=95.0,
         outer_hutchpp_precondition_enabled=True,
-        outer_hutchpp_samples=3,
+        outer_hutchpp_samples=1,
         outer_hutchpp_eps=1e-8,
+        outer_sachpp_enabled=True,
+        outer_sachpp_probe_count=1,
+        outer_sachpp_refresh_interval=10,
+        outer_sachpp_drift_threshold=0.05,
+        outer_sachpp_epsilon=1e-4,
+        outer_sachpp_use_qr_probes=True,
         outer_grad_clip_enabled=False,
         outer_lr_warmup_enabled=False,
         outer_hp_ema_enabled=False,
-        outer_plateau_detection_enabled=False,
+        outer_plateau_detection_enabled=True,
+        outer_plateau_delta_epsilon=1e-4,
+        outer_plateau_patience=15,
     )
+    if convergence is not None:
+        config_kwargs["outer_plateau_delta_epsilon"] = float(convergence.min_delta)
+        config_kwargs["outer_plateau_patience"] = int(convergence.patience)
     if ta_overrides:
         config_kwargs.update(ta_overrides)
 
-    config = TaLBFGSConfig(**config_kwargs)
     if hf_device == "auto":
         hf_device_resolved = "cuda" if torch.cuda.is_available() else "cpu"
     else:
         hf_device_resolved = hf_device
+
+    low_vram_mode = False
+    total_vram_gb = 0.0
+    if real_model_objective and hf_device_resolved == "cuda":
+        try:
+            total_vram_gb = float(torch.cuda.get_device_properties(0).total_memory) / float(1024 ** 3)
+        except Exception:
+            total_vram_gb = 0.0
+
+        if total_vram_gb > 0.0 and total_vram_gb <= 6.5:
+            low_vram_mode = True
+            config_kwargs["outer_sachpp_enabled"] = False
+            config_kwargs["outer_hutchpp_precondition_enabled"] = False
+            config_kwargs["inner_steps"] = min(int(config_kwargs.get("inner_steps", 3)), 1)
+            print(
+                "[LOW-VRAM MODE] Detected <= 6.5GB VRAM on CUDA device; "
+                "disabling outer Hessian preconditioners and reducing inner_steps=1."
+            )
+
+    config = TaLBFGSConfig(**config_kwargs)
 
     if real_model_objective:
         model = RealPromptTuningObjective(
@@ -849,19 +998,32 @@ def run_ta_lbfgs_baseline(
             prefix_len=4,
         )
         if dataset_prompts and len(dataset_prompts) >= 4:
-            train_prompts = [str(p) for p in dataset_prompts[:2]]
-            val_prompts = [str(p) for p in dataset_prompts[2:4]]
+            all_prompts = [str(p) for p in dataset_prompts]
+            split_idx = max(1, int(round(0.8 * len(all_prompts))))
+            train_pool = all_prompts[:split_idx]
+            val_pool = all_prompts[split_idx:] if split_idx < len(all_prompts) else all_prompts[:]
         elif dataset_prompts:
-            train_prompts = [str(dataset_prompts[0])]
-            val_prompts = [str(dataset_prompts[min(1, len(dataset_prompts) - 1)])]
+            base_pool = [str(p) for p in dataset_prompts]
+            train_pool = base_pool[:]
+            val_pool = base_pool[:]
         else:
-            train_prompts = [
+            train_pool = [
                 "Explain why quasi-Newton methods improve conditioning in deep optimization.",
                 "Describe tradeoffs between memory and curvature fidelity in L-BFGS.",
             ]
-            val_prompts = [
+            val_pool = [
                 "How does Hessian information help stabilize updates in non-convex landscapes?",
             ]
+
+        default_batch = 1 if low_vram_mode else 4
+        train_batch_size = min(default_batch, max(1, len(train_pool)))
+        val_batch_size = min(default_batch, max(1, len(val_pool)))
+        if low_vram_mode:
+            print(
+                "[LOW-VRAM MODE] Using minibatch size 1 for train/val prompt batches "
+                f"(detected_vram={total_vram_gb:.2f}GB)."
+            )
+        prompt_batch_cache: Dict[int, Tuple[List[str], List[str]]] = {}
     else:
         model = SyntheticMetaModel(
             n_layers=n_layers,
@@ -882,7 +1044,18 @@ def run_ta_lbfgs_baseline(
                 return functional_call_model(model_obj, params_override, prompt_texts=prompts)
             return model_obj(prompts)
 
+        def _current_prompt_batches() -> Tuple[List[str], List[str]]:
+            iter_idx = min(int(trial_cursor["idx"]), n_trials - 1)
+            cached = prompt_batch_cache.get(iter_idx)
+            if cached is not None:
+                return cached
+            train_batch = _sample_prompt_batch(train_pool, train_batch_size, iter_idx, stream_offset=0)
+            val_batch = _sample_prompt_batch(val_pool, val_batch_size, iter_idx, stream_offset=1)
+            prompt_batch_cache[iter_idx] = (train_batch, val_batch)
+            return train_batch, val_batch
+
         def train_fn(model_obj, _data, hyperparams, params_override=None):
+            train_prompts, _ = _current_prompt_batches()
             base_loss = _forward_real(model_obj, train_prompts, params_override=params_override)
             lr_vec = torch.stack([hyperparams.get_layer_lr(i) for i in range(n_layers)]).to(dtype=base_loss.dtype)
             wd_vec = torch.stack([hyperparams.get_layer_wd(i) for i in range(n_layers)]).to(dtype=base_loss.dtype)
@@ -890,6 +1063,7 @@ def run_ta_lbfgs_baseline(
             return base_loss * (1.0 + 0.05 * lr_vec.mean()) + 0.01 * wd_vec.mean() + 0.005 * torch.sin(sig)
 
         def val_fn(model_obj, _data, hyperparams, params_override=None):
+            _, val_prompts = _current_prompt_batches()
             base_loss = _forward_real(model_obj, val_prompts, params_override=params_override)
             lr_vec = torch.stack([hyperparams.get_layer_lr(i) for i in range(n_layers)]).to(dtype=base_loss.dtype)
             wd_vec = torch.stack([hyperparams.get_layer_wd(i) for i in range(n_layers)]).to(dtype=base_loss.dtype)
@@ -922,8 +1096,15 @@ def run_ta_lbfgs_baseline(
             loss = loss + 0.04 * torch.log(lr).pow(2).mean() + 0.02 * torch.cos(6.0 * w - sig).mean()
             return loss
 
-    def _progress_cb(payload: Dict[str, object]):
+    moving_monitor = MovingWindowConvergenceMonitor(convergence or ConvergenceConfig())
+
+    def _progress_cb(payload: Dict[str, object]) -> bool:
         trial_cursor["idx"] = int(payload["iteration"])
+        moving_monitor.update(float(payload["val_loss"]))
+        if moving_monitor.should_stop():
+            print(f"[EARLY STOP] ta-LBFGS {moving_monitor.reason()} at trial {int(payload['iteration'])}")
+            return True
+        return False
 
     start = time.perf_counter()
     run_result = bilevel.optimize(
@@ -980,10 +1161,11 @@ def run_ta_lbfgs_baseline(
 
 
 def run_pure_lbfgs_baseline(
-    n_trials: int = 40,
+    n_trials: int = 200,
     n_layers: int = 4,
     output_dir: str = "outputs",
     prompt_signatures: Optional[List[float]] = None,
+    convergence: Optional[ConvergenceConfig] = None,
 ) -> BaselineResult:
     print("=" * 60)
     print("  OPTIMIZATION BASELINE: Pure L-BFGS (torch.optim.LBFGS)")
@@ -994,6 +1176,7 @@ def run_pure_lbfgs_baseline(
         prompt_signatures = build_prompt_signatures(n_trials=n_trials, seed=42)
     if len(prompt_signatures) < n_trials:
         raise ValueError("prompt_signatures must contain at least n_trials entries")
+    monitor = LossConvergenceMonitor(convergence or ConvergenceConfig())
 
     hp_obj = DifferentiableHyperparameters(
         n_layers=n_layers,
@@ -1032,6 +1215,10 @@ def run_pure_lbfgs_baseline(
             current_loss = float(model.val_loss(hp_obj, prompt_signature=prompt_sig).item())
         loss_history.append(current_loss)
         best_loss = min(best_loss, current_loss)
+        monitor.update(current_loss)
+        if monitor.should_stop():
+            print(f"[EARLY STOP] L-BFGS {monitor.reason()} at trial {trial_idx + 1}")
+            break
 
         # keep step_loss reference used for potential debug consistency
         _ = step_loss
@@ -1315,6 +1502,7 @@ def run_mvp4_protocol(
     output_dir: str,
     prompt_signatures: List[float],
     dataset_prompts: Optional[List[str]],
+    convergence: Optional[ConvergenceConfig],
     args: argparse.Namespace,
 ) -> None:
     print("=" * 60)
@@ -1343,6 +1531,7 @@ def run_mvp4_protocol(
             output_dir=profile_output_dir,
             prompt_signatures=prompt_signatures,
             ta_overrides=dict(profile.ta_overrides),
+            convergence=convergence,
             real_model_objective=True,
             hf_model_id=args.hf_model_id,
             hf_local_path=args.hf_local_path or None,
@@ -1419,7 +1608,30 @@ if __name__ == "__main__":
             "(smoke/perf) and full-fidelity (claim-valid) side-by-side."
         ),
     )
-    parser.add_argument("--trials", type=int, default=40)
+    parser.add_argument(
+        "--convergence-min-trials",
+        type=int,
+        default=20,
+        help="Minimum number of trials before convergence stopping can trigger.",
+    )
+    parser.add_argument(
+        "--convergence-patience",
+        type=int,
+        default=15,
+        help="Stop when this many consecutive trials fail to improve best loss by min-delta.",
+    )
+    parser.add_argument(
+        "--convergence-min-delta",
+        type=float,
+        default=1e-4,
+        help="Minimum best-loss improvement required to reset convergence patience.",
+    )
+    parser.add_argument(
+        "--convergence-window",
+        type=int,
+        default=5,
+        help="Moving window size used for ta-LBFGS minibatch validation convergence.",
+    )
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument(
         "--method",
@@ -1475,17 +1687,25 @@ if __name__ == "__main__":
     parser.add_argument("--real-max-length", type=int, default=128)
     parser.add_argument("--output-dir", type=str, default="outputs")
     args = parser.parse_args()
+    convergence = ConvergenceConfig(
+        min_trials=max(1, int(args.convergence_min_trials)),
+        patience=max(1, int(args.convergence_patience)),
+        min_delta=max(0.0, float(args.convergence_min_delta)),
+        window_size=max(1, int(args.convergence_window)),
+    )
+    # Keep a finite safety cap while letting convergence fully govern stopping.
+    trial_budget = max(200, convergence.min_trials + (10 * convergence.patience))
 
     results: List[BaselineResult] = []
     dataset_prompts = load_dataset_prompts(
         source_path=args.prompt_source,
-        max_prompts=max(args.prompt_max_samples, args.trials),
+        max_prompts=max(args.prompt_max_samples, trial_budget),
     )
 
     if args.signature_source == "hf_cached" and dataset_prompts:
         prompt_signatures = build_prompt_signatures_from_hf_cache(
             prompt_texts=dataset_prompts,
-            n_trials=args.trials,
+            n_trials=trial_budget,
             model_id=args.hf_model_id,
             local_path=args.hf_local_path or None,
             max_length=args.hf_max_length,
@@ -1495,7 +1715,7 @@ if __name__ == "__main__":
         if args.signature_source == "hf_cached" and not dataset_prompts:
             print("[WARNING] hf_cached signature source requested but no dataset prompts found; falling back to hash signatures.")
         prompt_signatures = build_prompt_signatures(
-            n_trials=args.trials,
+            n_trials=trial_budget,
             seed=args.seed,
             min_trace_steps=args.trace_min_steps,
             max_trace_steps=args.trace_max_steps,
@@ -1514,24 +1734,56 @@ if __name__ == "__main__":
         "(1 optimization iteration + 1 unique long-reasoning prompt per trial)."
     )
     print(f"Signature source: {args.signature_source}")
+    print(f"Internal max trial budget: {trial_budget}")
+    print(
+        "Convergence stop: "
+        f"min_trials={convergence.min_trials}, patience={convergence.patience}, "
+        f"min_delta={convergence.min_delta:.3e}, window={convergence.window_size}"
+    )
 
     if args.benchmark_design == "mvp4":
         run_mvp4_protocol(
-            n_trials=args.trials,
+            n_trials=trial_budget,
             n_layers=args.layers,
             output_dir=args.output_dir,
             prompt_signatures=prompt_signatures,
             dataset_prompts=dataset_prompts if dataset_prompts else None,
+            convergence=convergence,
             args=args,
         )
         raise SystemExit(0)
 
     if args.method in {"optuna", "all"}:
-        results.append(run_optuna_baseline(args.trials, args.layers, args.output_dir, prompt_signatures=prompt_signatures))
+        results.append(
+            run_optuna_baseline(
+                trial_budget,
+                args.layers,
+                args.output_dir,
+                prompt_signatures=prompt_signatures,
+                convergence=convergence,
+            )
+        )
     if args.method in {"random", "all"}:
-        results.append(run_random_baseline(args.trials, args.layers, args.output_dir, args.seed, prompt_signatures=prompt_signatures))
+        results.append(
+            run_random_baseline(
+                trial_budget,
+                args.layers,
+                args.output_dir,
+                args.seed,
+                prompt_signatures=prompt_signatures,
+                convergence=convergence,
+            )
+        )
     if args.method in {"grid", "all"}:
-        results.append(run_grid_baseline(args.trials, args.layers, args.output_dir, prompt_signatures=prompt_signatures))
+        results.append(
+            run_grid_baseline(
+                trial_budget,
+                args.layers,
+                args.output_dir,
+                prompt_signatures=prompt_signatures,
+                convergence=convergence,
+            )
+        )
     if args.method in {"ta_lbfgs", "all"}:
         ta_overrides: Dict[str, object] = {
             "lbfgs_lr": float(args.ta_lr),
@@ -1547,11 +1799,12 @@ if __name__ == "__main__":
             print("[NOTE] --ta-disable-edrt has no effect in strict bilevel benchmark mode.")
         results.append(
             run_ta_lbfgs_baseline(
-                args.trials,
+                trial_budget,
                 args.layers,
                 args.output_dir,
                 prompt_signatures=prompt_signatures,
                 ta_overrides=ta_overrides,
+                convergence=convergence,
                 real_model_objective=bool(args.real_model_objective),
                 hf_model_id=args.hf_model_id,
                 hf_local_path=args.hf_local_path or None,
@@ -1561,7 +1814,15 @@ if __name__ == "__main__":
             )
         )
     if args.method in {"lbfgs", "all"}:
-        results.append(run_pure_lbfgs_baseline(args.trials, args.layers, args.output_dir, prompt_signatures=prompt_signatures))
+        results.append(
+            run_pure_lbfgs_baseline(
+                trial_budget,
+                args.layers,
+                args.output_dir,
+                prompt_signatures=prompt_signatures,
+                convergence=convergence,
+            )
+        )
 
     if len(results) > 1:
         print("\n" + "=" * 60)

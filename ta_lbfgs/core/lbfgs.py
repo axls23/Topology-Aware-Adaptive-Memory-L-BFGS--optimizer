@@ -13,9 +13,56 @@ import torch.nn as nn
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable, Any
 from collections import defaultdict
+from torch import Tensor
 
 from .baseline_lbfgs import FullBatchLBFGS, is_legal
 from ..config import TaLBFGSConfig
+from ..utils.kfac import KFACEmbedding
+
+
+PARAM_GROUP_TYPES = ("rope", "embedding", "layernorm", "lora", "standard")
+FROZEN_GROUPS = ("rope", "embedding")
+
+
+def classify_param_group(name: str, param: Tensor, model) -> str:
+    """Route each parameter to the correct curvature handler."""
+    n = name.lower()
+    if any(x in n for x in ("rope", "rotary", "freq")):
+        return "rope"
+    if any(x in n for x in ("embed", "lm_head", "wte")):
+        return "embedding"
+    if any(x in n for x in ("norm", "layernorm", "ln_")):
+        return "layernorm"
+    if any(x in n for x in ("lora_a", "lora_b", "lora_")):
+        return "lora"
+    return "standard"
+
+
+def should_freeze_in_inner_loop(param_group_type: str) -> bool:
+    """Rope and embedding are outer-loop only. Never update in inner loop."""
+    return param_group_type in FROZEN_GROUPS
+
+
+class AdamDiagPreconditioner:
+    """For LayerNorm gamma/beta: exact diagonal Hessian proxy with EMA moments."""
+
+    def __init__(self, eps: float = 1e-8, beta2: float = 0.999):
+        self.v: Optional[Tensor] = None
+        self.eps = eps
+        self.beta2 = beta2
+
+    def step(self, grad: Tensor) -> Tensor:
+        if self.v is None:
+            self.v = torch.zeros_like(grad)
+        self.v.mul_(self.beta2).addcmul_(grad, grad, value=1 - self.beta2)
+        return grad / (self.v.sqrt() + self.eps)
+
+
+# ADDS: module-level validity gate for tests and shared pair checking semantics.
+# REMOVES: dependence on simple y^T s > 0 acceptance in curvature pairing logic.
+def _is_valid_pair(s: torch.Tensor, y: torch.Tensor, eps_rel: float = 0.01) -> bool:
+    dot = (y @ s).item()
+    return dot > eps_rel * y.norm().item() * s.norm().item()
 
 
 @dataclass
@@ -57,13 +104,16 @@ class LayerwiseTaLBFGS:
         config: TaLBFGSConfig instance.
     """
 
-    def __init__(self, config: TaLBFGSConfig):
+    def __init__(self, config: TaLBFGSConfig, model: Optional[nn.Module] = None):
         self.config = config
+        self.model = model
         self.layer_optimizers: Dict[str, FullBatchLBFGS] = {}
         self.layer_states: Dict[str, LayerState] = {}
         self.evasion_log: List[Dict[str, Any]] = []
         self._callbacks: List[Callable] = []
         self._topology_state: Dict[str, Dict[str, Any]] = {}
+        self._layer_group_type: Dict[str, str] = {}
+        self._kfac_embed: Dict[str, KFACEmbedding] = {}
 
     def register_layer(self, name: str, params: List[nn.Parameter]):
         """
@@ -76,10 +126,14 @@ class LayerwiseTaLBFGS:
             name: Layer identifier (e.g., 'layers.0', 'layers.1').
             params: List of nn.Parameter tensors for this layer.
         """
+        group_type = classify_param_group(name, params[0].data if params else torch.empty(0), self.model)
+        self._layer_group_type[name] = group_type
+        history_size = self.config.lbfgs_memory_max if group_type == "embedding" else self.config.lbfgs_memory_base
+
         optimizer = FullBatchLBFGS(
             params,
             lr=self.config.lbfgs_lr,
-            history_size=self.config.lbfgs_memory_base,
+            history_size=history_size,
             line_search=self.config.lbfgs_line_search,
             damping=self.config.lbfgs_damping,
             damping_eps=self.config.lbfgs_damping_eps,
@@ -96,6 +150,8 @@ class LayerwiseTaLBFGS:
         legacy_topology_enabled = (
             self.config.auto_topology_enabled and not self.config.inner_secant_topology_enabled
         )
+        if group_type == "embedding":
+            legacy_topology_enabled = False
         self.layer_optimizers[name] = optimizer
         self.layer_states[name] = LayerState(
             name=name,
@@ -113,6 +169,61 @@ class LayerwiseTaLBFGS:
             "sketch": None,
             "num_params": sum(p.numel() for p in params),
         }
+
+        if group_type == "embedding" and params:
+            p0 = params[0].data
+            if p0.dim() == 2:
+                self._kfac_embed[name] = KFACEmbedding(vocab_size=p0.shape[0], embed_dim=p0.shape[1])
+
+    def _embedding_kfac_step(self, layer_name: str, closure: Callable) -> Dict[str, Any]:
+        opt = self.layer_optimizers[layer_name]
+        state = self.layer_states[layer_name]
+
+        for p in opt._params:
+            if p.grad is not None:
+                p.grad.zero_()
+        loss = closure()
+
+        grad_norm = 0.0
+        for p in opt._params:
+            if p.grad is not None:
+                grad_norm += float(p.grad.norm().item())
+
+        precond_norm = grad_norm
+        kfac = self._kfac_embed.get(layer_name)
+        if kfac is not None and opt._params and opt._params[0].grad is not None:
+            p0 = opt._params[0]
+            if p0.data.dim() == 2 and p0.grad.dim() == 2:
+                embed_in = p0.data
+                grad_out = p0.grad
+                kfac.update(embed_in, grad_out)
+                pre = kfac.inverse_precondition(grad_out)
+                p0.data.add_(pre, alpha=-self.config.lbfgs_lr)
+                precond_norm = float(pre.norm().item())
+                for p in opt._params[1:]:
+                    if p.grad is not None:
+                        p.data.add_(p.grad, alpha=-self.config.lbfgs_lr)
+
+        state.grad_norm = precond_norm
+        state.grad_norm_history.append(precond_norm)
+        state.iteration += 1
+        state.secant_value = 0.0
+        state.secant_history.append(0.0)
+        state.landscape_status = "Embedding-KFAC"
+
+        result = {
+            "layer": layer_name,
+            "loss": loss.item() if isinstance(loss, torch.Tensor) else loss,
+            "grad_norm": precond_norm,
+            "kappa": state.kappa,
+            "memory_size": state.memory_size,
+            "secant": 0.0,
+            "landscape": state.landscape_status,
+            "evasion": False,
+        }
+        for cb in self._callbacks:
+            cb(result)
+        return result
 
     def register_callback(self, callback: Callable):
         """Register a callback invoked after each layer step (for dashboard)."""
@@ -268,6 +379,8 @@ class LayerwiseTaLBFGS:
         opt = self.layer_optimizers[layer_name]
         state = self.layer_states[layer_name]
         topo = self._topology_state[layer_name]
+        if self._layer_group_type.get(layer_name) == "embedding":
+            return self._embedding_kfac_step(layer_name, closure)
 
         # ── Adaptive Memory Sizing ──────────────────────────────────
         if kappa is not None and self.config.adaptive_memory_enabled:
@@ -453,17 +566,27 @@ class LayerwiseTaLBFGS:
 
     def _inject_perturbation(self, opt: FullBatchLBFGS, flat_grad: torch.Tensor):
         """
-        Inject an orthogonal perturbation to escape saddle points.
-
-        Generates a random vector orthogonal to the current gradient
-        and applies a scaled perturbation to the parameters.
+        Inject an eigenvector-directed perturbation to escape saddle points.
         """
-        from ..topology.saddle import generate_orthogonal_perturbation
+        from ..topology.saddle import escape_saddle, is_saddle_point
 
-        perturbation = generate_orthogonal_perturbation(
-            flat_grad, self.config.perturbation_scale
+        # ADDS: Lanczos probe over two-loop recursion before perturbing parameters.
+        # REMOVES: unconditional random orthogonal perturbation update path.
+        two_loop_fn = lambda v: opt.two_loop_recursion(v)
+        saddle, min_eigvec = is_saddle_point(
+            two_loop_fn,
+            dim=int(flat_grad.numel()),
+            eps=self.config.secant_threshold,
         )
-        opt._add_update(1.0, perturbation)
+        if not saddle:
+            return
+        grad_norm = float(flat_grad.norm().item())
+        escape_saddle(
+            params=list(opt._params),
+            grad_norm=grad_norm,
+            min_eigvec=min_eigvec.to(device=flat_grad.device, dtype=flat_grad.dtype),
+            scale=self.config.perturbation_scale,
+        )
 
     def get_all_layer_data(self) -> Dict[str, Dict]:
         """Get current state of all layers (for dashboard rendering)."""

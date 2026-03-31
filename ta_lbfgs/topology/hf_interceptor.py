@@ -81,9 +81,20 @@ def build_topology_snapshot(
     past_kv = getattr(outputs, "past_key_values", None)
     if past_kv is not None:
         snap.kv_key_norms = []
-        for keys, _ in past_kv:
-            norms = keys.detach().norm(dim=-1).mean(dim=(0, 2))
-            snap.kv_key_norms.append(norms.tolist())
+        for item in past_kv:
+            # Handle both (key, value) tuples and DynamicCache or other objects
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                keys = item[0]
+            elif hasattr(item, "key"):
+                keys = item.key
+            else:
+                continue
+            
+            try:
+                norms = keys.detach().norm(dim=-1).mean(dim=(0, 2))
+                snap.kv_key_norms.append(norms.tolist())
+            except Exception:
+                continue
 
     raw_router = getattr(outputs, "router_logits", None)
     if raw_router is not None:

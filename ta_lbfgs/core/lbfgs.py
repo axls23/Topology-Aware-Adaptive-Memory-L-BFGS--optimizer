@@ -79,7 +79,10 @@ class LayerState:
     grad_norm: float = 0.0            # ||∇||
     secant_value: float = 1.0         # y_k^T s_k
     landscape_status: str = "Unknown" # Convex Bowl / Narrow Ravine / Saddle Point
+    morse_index: int = 0              # number of negative eigenvalues
+    topology_euler_char: int = 0      # Betti number / Euler connection
     kappa_history: List[float] = field(default_factory=list)
+    morse_history: List[int] = field(default_factory=list)
     grad_norm_history: List[float] = field(default_factory=list)
     secant_history: List[float] = field(default_factory=list)
     loss_history: List[float] = field(default_factory=list)
@@ -383,8 +386,27 @@ class LayerwiseTaLBFGS:
         state: LayerState,
         loss_value: Optional[float],
     ) -> Dict[str, Any]:
+        from ..topology.condition import estimate_condition_and_subspace
+        from ..topology.saddle import detect_topology_break
+        
         layer_idx = self._layer_index.get(layer_name, 0)
         secant_pair = self._latest_secant_pair(opt)
+
+        global_state = opt.state.get("global_state", {})
+        old_dirs = global_state.get("old_dirs", [])
+        if len(old_dirs) >= 4:
+            # Compute True TDA: Euler characteristic on the PCA active subspace
+            matrix = torch.stack(old_dirs).view(len(old_dirs), -1)
+            sketch_dim = int(getattr(self.config, "auto_topology_sketch_dim", 8))
+            kappa, active_subspace = estimate_condition_and_subspace(matrix, n_components=sketch_dim)
+            if active_subspace is not None:
+                topo_break = detect_topology_break(
+                    recent_gradients=matrix,
+                    distance_threshold=float(getattr(self.config, "distance_threshold", 0.05)),
+                    prev_chi=state.topology_euler_char,
+                    active_subspace=active_subspace,
+                )
+                state.topology_euler_char = topo_break.get("euler_characteristic", state.topology_euler_char)
 
         if self._pending_topology_snapshot is not None:
             self._update_topology_from_snapshot(self._pending_topology_snapshot, float(state.grad_norm))
@@ -801,11 +823,12 @@ class LayerwiseTaLBFGS:
         # ADDS: Lanczos probe over two-loop recursion before perturbing parameters.
         # REMOVES: unconditional random orthogonal perturbation update path.
         two_loop_fn = lambda v: opt.two_loop_recursion(v)
-        saddle, min_eigvec = is_saddle_point(
+        saddle, min_eigvec, morse_index = is_saddle_point(
             two_loop_fn,
             dim=int(flat_grad.numel()),
             eps=self.config.secant_threshold,
         )
+        opt.state.setdefault("global_state", {})["morse_index"] = morse_index
         if not saddle:
             return
         grad_norm = float(flat_grad.norm().item())
@@ -828,9 +851,11 @@ class LayerwiseTaLBFGS:
                 "landscape": state.landscape_status,
                 "kappa_history": state.kappa_history,
                 "grad_norm_history": state.grad_norm_history,
+                "morse_history": state.morse_history,
                 "evasion_count": state.evasion_count,
                 "iteration": state.iteration,
                 "topology_edges": state.topology_edges,
+                "topology_euler_char": state.topology_euler_char,
                 "topology_segment": state.topology_segment,
                 "topology_hessian_strategy": state.topology_hessian_strategy,
             }
@@ -840,3 +865,16 @@ class LayerwiseTaLBFGS:
     def total_iterations(self) -> int:
         """Total iterations across all layers."""
         return sum(s.iteration for s in self.layer_states.values())
+
+class TaLBFGS(FullBatchLBFGS):
+    """
+    Topology-Aware L-BFGS Optimizer (Single Group).
+    
+    A standard PyTorch Optimizer API that enables topological 
+    features out-of-the-box for a flat parameter list.
+    """
+    def __init__(self, params, lr=1.0, **kwargs):
+        kwargs.setdefault("history_size", 20)
+        kwargs.setdefault("secant_topology_enabled", True)
+        kwargs.setdefault("damping", True)
+        super().__init__(params, lr=lr, **kwargs)

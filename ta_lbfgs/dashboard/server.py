@@ -160,7 +160,7 @@ class DashboardServer:
                 parsed = urlparse(self.path)
                 path = parsed.path
 
-                if path in {"/", "/ui.html"}:
+                if path in {"/", "/ui.html", "/index.html"}:
                     self._serve_ui()
                     return
                 if path == "/events":
@@ -171,6 +171,9 @@ class DashboardServer:
                     return
                 if path.startswith("/static/"):
                     self._serve_static(path[len("/static/"):])
+                    return
+                if path.endswith(".js") or path.endswith(".css"):
+                    self._serve_static(path.lstrip("/"))
                     return
 
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
@@ -189,12 +192,12 @@ class DashboardServer:
                 return
 
             def _serve_ui(self) -> None:
-                ui_path = os.path.join(os.path.dirname(__file__), "ui.html")
+                ui_path = os.path.join(_WEB_UI_DIR, "index.html")
                 try:
                     with open(ui_path, "rb") as f:
                         body = f.read()
                 except OSError:
-                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "ui.html missing")
+                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "web-ui/index.html missing")
                     return
 
                 self.send_response(HTTPStatus.OK)
@@ -234,11 +237,18 @@ class DashboardServer:
                     while True:
                         try:
                             payload = q.get(timeout=15.0)
-                            self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                            try:
+                                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                                self.wfile.flush()
+                            except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError):
+                                break
                         except queue.Empty:
-                            self.wfile.write(b": keepalive\n\n")
-                        self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
+                            try:
+                                self.wfile.write(b": keepalive\n\n")
+                                self.wfile.flush()
+                            except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError):
+                                break
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     pass
                 finally:
                     with server._clients_lock:

@@ -1,0 +1,17 @@
+{
+  "step": 10,
+  "points": [
+    {
+      "birth": 0.1,
+      "death": 0.5,
+      "dimension": 0,
+      "persistence": 0.4
+    },
+    {
+      "birth": 0.2,
+      "death": 0.9,
+      "dimension": 1,
+      "persistence": 0.7
+    }
+  ]
+}

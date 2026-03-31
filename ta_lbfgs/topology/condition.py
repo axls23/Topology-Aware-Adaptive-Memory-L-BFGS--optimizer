@@ -8,7 +8,40 @@ approximation using truncated SVD with NaN sanitization.
 
 import numpy as np
 import torch
-from typing import Optional
+from typing import Optional, Tuple
+
+def estimate_condition_and_subspace(
+    matrix: torch.Tensor,
+    n_components: int = 8,
+) -> Tuple[float, Optional[torch.Tensor]]:
+    """
+    Estimate condition number and compute the active subspace PCA vectors.
+    """
+    X = matrix.detach().cpu().numpy()
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+    active_cols = np.where(X.std(axis=0) > 1e-6)[0]
+    if len(active_cols) == 0:
+        return 1.0, None
+
+    X_active = X[:, active_cols]
+    X_centered = X_active - X_active.mean(axis=0)
+
+    try:
+        _, S, Vh = np.linalg.svd(X_centered, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return 1.0, None
+
+    k = min(n_components, len(S))
+    S_top = S[:k]
+    sigma_min = S_top[-1] if S_top[-1] > 1e-12 else 1e-12
+    kappa = float(S_top[0] / sigma_min)
+
+    # Reconstruct the subspace vectors in the original dimension
+    V_full = np.zeros((k, X.shape[1]), dtype=X.dtype)
+    V_full[:, active_cols] = Vh[:k, :]
+    
+    return kappa, torch.from_numpy(V_full).to(matrix.device)
 
 
 def estimate_condition_number(
@@ -31,27 +64,7 @@ def estimate_condition_number(
     Returns:
         Condition number κ (float). Returns 1.0 for degenerate cases.
     """
-    X = matrix.detach().cpu().numpy()
-    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-
-    # Filter zero-variance columns
-    active_cols = np.where(X.std(axis=0) > 1e-6)[0]
-    if len(active_cols) == 0:
-        return 1.0  # Perfectly conditioned (degenerate)
-
-    X_active = X[:, active_cols]
-    X_centered = X_active - X_active.mean(axis=0)
-
-    try:
-        _, S, _ = np.linalg.svd(X_centered, full_matrices=False)
-    except np.linalg.LinAlgError:
-        return 1.0
-
-    k = min(n_components, len(S))
-    S_top = S[:k]
-    sigma_min = S_top[-1] if S_top[-1] > 1e-12 else 1e-12
-    kappa = float(S_top[0] / sigma_min)
-
+    kappa, _ = estimate_condition_and_subspace(matrix, n_components)
     return kappa
 
 

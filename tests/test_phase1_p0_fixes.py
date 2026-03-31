@@ -79,7 +79,7 @@ def test_neumann_well_conditioned_accurate(well_conditioned_H_fn):
 
 def test_lanczos_detects_saddle_correctly(saddle_H_fn):
     torch.manual_seed(0)
-    is_sad, eigvec = is_saddle_point(saddle_H_fn, dim=3, eps=1e-4)
+    is_sad, eigvec, morse_index = is_saddle_point(saddle_H_fn, dim=3, eps=1e-4)
     assert is_sad, (
         "is_saddle_point returned False for diag(2,-0.5,1). "
         "lambda_min=-0.5 should trigger saddle detection per Fix 1.2A."
@@ -94,7 +94,7 @@ def test_lanczos_detects_saddle_correctly(saddle_H_fn):
 
 def test_lanczos_no_false_positive_on_pd_matrix(pd_H_fn):
     torch.manual_seed(0)
-    is_sad, _ = is_saddle_point(pd_H_fn, dim=3, eps=1e-4)
+    is_sad, _, _ = is_saddle_point(pd_H_fn, dim=3, eps=1e-4)
     assert not is_sad, (
         "is_saddle_point returned True on PD diag(1,2,3). "
         "This is a false positive that violates Fix 1.2A."

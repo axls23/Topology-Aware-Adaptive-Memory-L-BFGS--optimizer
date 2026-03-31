@@ -587,7 +587,6 @@ function trySSEConnection() {
       // Keep standalone mode — don't show alarming "Offline"
       dot.className = "status-dot standalone";
       text.textContent = "Standalone";
-      es.close();
     };
     es.onmessage = (ev) => {
       try {
@@ -596,18 +595,321 @@ function trySSEConnection() {
           dot.className = "status-dot online";
           text.textContent = `Live — Step ${data.run.outer_step}`;
         }
+
+        // Disable synthetic SIM if running
+        if (SIM.running) {
+          clearInterval(SIM.interval);
+          SIM.running = false;
+          const btn = document.getElementById("btnStartSim");
+          if (btn) {
+            btn.disabled = true;
+            btn.textContent = "Live Stream Active";
+          }
+        }
+
+        // Wire all main metrics, charts, and events
+        updateLiveDashboardUI(data);
+
         // Wire topology_3d data to Topo3D visualization
         if (data.topology_3d && window.Topo3D && window.Topo3D.update) {
           window.Topo3D.update(data.topology_3d);
         }
-      } catch (e) {}
+        // Wire persistence diagram data
+        if (data.persistence && data.persistence.diagram) {
+          updatePersistenceDiagram(data.persistence);
+        }
+      } catch (e) {
+        console.error("SSE parsing error:", e);
+      }
     };
   } catch (e) {
     // Server not running — stay in standalone mode
   }
 }
 
-// ── Init ────────────────────────────────────────────────────────
+function updateLiveDashboardUI(data) {
+  if (!data || !data.run) return;
+  const { run, trajectory, heatmap, experts, events } = data;
+
+  // Header Metrics
+  const lossEl = document.getElementById("dValLoss");
+  if (lossEl) lossEl.textContent = run.val_loss.toFixed(4);
+
+  if (trajectory && trajectory.loss && trajectory.loss.length > 0) {
+    const losses = trajectory.loss;
+    const currentLoss = losses[losses.length - 1];
+    const prevLoss = losses.length > 1 ? losses[losses.length - 2] : currentLoss;
+    const delta = currentLoss - prevLoss;
+
+    const deltaEl = document.getElementById("dValDelta");
+    if (deltaEl) {
+      deltaEl.textContent = `${delta >= 0 ? "+" : ""}${delta.toFixed(4)}`;
+      deltaEl.className = `dash-metric-delta ${delta < 0 ? "negative" : "positive"}`;
+    }
+
+    // Trend
+    const trend = document.getElementById("lossTrend");
+    if (trend && losses.length >= 5) {
+      const recent = losses.slice(-5);
+      const d = recent[recent.length - 1] - recent[0];
+      trend.textContent = d < -0.05 ? "↓ Converging" : d > 0.05 ? "↑ Diverging" : "→ Plateau";
+      trend.style.color = d < -0.05 ? "#22c55e" : d > 0.05 ? "#ef4444" : "#f59e0b";
+    }
+  }
+
+  const stepEl = document.getElementById("dStep");
+  if (stepEl) stepEl.textContent = `${run.outer_step} / ${run.max_outer_steps}`;
+
+  const stepFill = document.getElementById("dStepFill");
+  if (stepFill) stepFill.style.width = Math.min(100, (run.outer_step / Math.max(1, run.max_outer_steps)) * 100) + "%";
+
+  const meanKappa = run.mean_kappa || 1.0;
+  const kappaEl = document.getElementById("dKappa");
+  if (kappaEl) kappaEl.textContent = meanKappa.toFixed(1);
+
+  const kappaTag = document.getElementById("dKappaTag");
+  if (kappaTag) {
+    if (meanKappa < 10) {
+      kappaTag.textContent = "Well-conditioned";
+      kappaTag.style.color = "#22c55e";
+      kappaTag.style.background = "rgba(34,197,94,0.1)";
+    } else if (meanKappa < 30) {
+      kappaTag.textContent = "Moderate";
+      kappaTag.style.color = "#f59e0b";
+      kappaTag.style.background = "rgba(245,158,11,0.1)";
+    } else {
+      kappaTag.textContent = "Ill-conditioned";
+      kappaTag.style.color = "#ef4444";
+      kappaTag.style.background = "rgba(239,68,68,0.1)";
+    }
+  }
+
+  const bypassEl = document.getElementById("dEvasions");
+  if (bypassEl) bypassEl.textContent = trajectory && trajectory.pivot_steps ? trajectory.pivot_steps.length : "0";
+
+  // Simulation Status
+  const simText = document.getElementById("simStatus");
+  if (simText && run.status) {
+    const isDone = run.status === 'completed' || run.outer_step >= run.max_outer_steps;
+    simText.textContent = isDone ? "✓ Live Run Complete" : `Live Step ${run.outer_step}/${run.max_outer_steps}`;
+  }
+
+  // Charts
+  if (typeof lossChart !== "undefined" && trajectory && trajectory.loss) {
+    const lossData = trajectory.loss.slice(-100);
+    const pivots = (trajectory.pivot_steps || []).filter(p => p >= run.outer_step - 100);
+    const chartMarkers = pivots.map(p => {
+      // Find index within the sliced array (approximate if mapped step-to-step 1:1)
+      const relativeIdx = lossData.length - 1 - (run.outer_step - p);
+      return { idx: Math.max(0, relativeIdx), color: "#ef4444" };
+    });
+
+    lossChart.update([{
+      color: "rgb(99,102,241)",
+      data: lossData,
+      fill: true,
+      markers: chartMarkers
+    }]);
+  }
+
+  const kappaColors = ["#6366f1", "#a855f7", "#ec4899", "#14b8a6"];
+  if (typeof kappaChart !== "undefined" && heatmap && heatmap.kappa) {
+    if (!window.liveKappaHist) window.liveKappaHist = [[], [], [], []];
+    const mappedKappa = [];
+    const numLayers = Math.min(4, heatmap.kappa.length);
+    for (let i = 0; i < numLayers; i++) {
+      // Simple heuristic: Average of heads for layer 'i' if array provided
+      const layerVals = heatmap.kappa[i];
+      let layerKappa = meanKappa;
+      if (Array.isArray(layerVals) && layerVals.length > 0) {
+        layerKappa = layerVals.reduce((a, b) => a + b, 0) / layerVals.length;
+      } else if (typeof layerVals === 'number') {
+        layerKappa = layerVals;
+      }
+
+      window.liveKappaHist[i].push(layerKappa);
+      if (window.liveKappaHist[i].length > 40) window.liveKappaHist[i].shift();
+      mappedKappa.push({ color: kappaColors[i], data: window.liveKappaHist[i] });
+    }
+    kappaChart.update(mappedKappa);
+
+    // Update TopoGrid
+    const topoGrid = document.getElementById("topoGrid");
+    if (topoGrid) {
+      topoGrid.innerHTML = heatmap.kappa.slice(0, 4).map((rowVals, i) => {
+        let k = meanKappa;
+        if (Array.isArray(rowVals) && rowVals.length > 0) {
+          k = rowVals.reduce((a, b) => a + b, 0) / rowVals.length;
+        } else if (typeof rowVals === 'number') { k = rowVals; }
+
+        let cellClass = "convex", landscape = "Convex Bowl";
+        if (k > 30) { cellClass = "ravine"; landscape = "Narrow Ravine"; }
+        else if (k > 10) { cellClass = "ill"; landscape = "Ill-Conditioned"; }
+        else if (k <= 0) { cellClass = "saddle"; landscape = "Saddle Point"; }
+
+        const memSize = Math.max(3, Math.min(20, Math.ceil(Math.log2(Math.max(1, k)))));
+        return `<div class="topo-cell ${cellClass}">
+            <div class="topo-cell-name">Block ${i}</div>
+            <div class="topo-cell-kappa">${k.toFixed(1)}</div>
+            <div class="topo-cell-status">${landscape}</div>
+            <div class="topo-cell-mem">m = ${memSize}</div>
+          </div>`;
+      }).join("");
+    }
+  }
+
+  if (typeof hpChart !== "undefined" && experts && experts.rows) {
+    if (!window.liveHpHist) window.liveHpHist = [[], [], [], []];
+    const hpMapped = [];
+    const numExperts = Math.min(4, experts.rows.length);
+    for (let i = 0; i < numExperts; i++) {
+      const load = experts.rows[i].load || 0.0;
+      window.liveHpHist[i].push(load);
+      if (window.liveHpHist[i].length > 40) window.liveHpHist[i].shift();
+      hpMapped.push({ color: kappaColors[i], data: window.liveHpHist[i] });
+    }
+    hpChart.update(hpMapped);
+  }
+
+  // Event Feed
+  if (events && Array.isArray(events)) {
+    const eventFeed = document.getElementById("eventFeed");
+    const eventCount = document.getElementById("eventCount");
+    if (eventFeed) {
+      const reversedEvents = [...events].reverse().slice(0, 20);
+      eventFeed.innerHTML = reversedEvents.map(tx => {
+        let typeBtn = "info";
+        const low = tx.toLowerCase();
+        if (low.includes("pivot") || low.includes("evasion")) typeBtn = "pivot";
+        else if (low.includes("spectral") || low.includes("guard")) typeBtn = "spectral";
+        else if (low.includes("converge") || low.includes("complete")) typeBtn = "converge";
+        return `<div class="event-item">
+            <span class="event-dot ${typeBtn}"></span>
+            ${tx}
+          </div>`;
+      }).join("");
+    }
+    if (eventCount) eventCount.textContent = `${events.length} events`;
+  }
+}
+
+// ── Persistence Diagram Renderer ─────────────────────────────
+function updatePersistenceDiagram(p) {
+  const el = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  const b = p.betti || {};
+  el("pBetti0", b[0] !== undefined ? b[0] : "—");
+  el("pBetti1", b[1] !== undefined ? b[1] : "—");
+  el("pMaxPers", p.max_persistence !== undefined ? p.max_persistence.toFixed(3) : "—");
+  el("pSaddleCount", p.saddle_count !== undefined ? p.saddle_count : "—");
+
+  // Energy bar
+  const maxEnergy = 50;
+  const energy = Math.min(p.total_persistence || 0, maxEnergy);
+  el("pEnergyVal", (p.total_persistence || 0).toFixed(2));
+  const fill = document.getElementById("pEnergyFill");
+  if (fill) fill.style.width = ((energy / maxEnergy) * 100) + "%";
+
+  // Canvas scatter plot
+  const canvas = document.getElementById("persistenceCanvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+  const pad = 40;
+
+  ctx.clearRect(0, 0, W, H);
+
+  const points = p.diagram || [];
+  if (points.length === 0) return;
+
+  // Data range
+  let minV = Infinity, maxV = -Infinity;
+  points.forEach(pt => {
+    const birth = pt[0], death = pt[1];
+    if (birth < minV) minV = birth;
+    if (death < minV) minV = death;
+    if (birth > maxV) maxV = birth;
+    if (death > maxV) maxV = death;
+  });
+  const range = (maxV - minV) || 1;
+  const plotSize = Math.min(W, H) - 2 * pad;
+  const sx = (v) => pad + ((v - minV) / range) * plotSize;
+  const sy = (v) => H - pad - ((v - minV) / range) * plotSize;
+
+  // Diagonal (birth = death)
+  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(sx(minV), sy(minV));
+  ctx.lineTo(sx(maxV), sy(maxV));
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Grid
+  ctx.strokeStyle = "rgba(255,255,255,0.03)";
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 4; i++) {
+    const v = minV + (range * i) / 4;
+    const x = sx(v), y = sy(v);
+    ctx.beginPath(); ctx.moveTo(x, pad); ctx.lineTo(x, H - pad); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(W - pad, y); ctx.stroke();
+  }
+
+  // Points (H0=indigo, H1=pink)
+  const colors = { 0: "#6366f1", 1: "#ec4899" };
+  points.forEach(pt => {
+    const birth = pt[0], death = pt[1], dim = Math.round(pt[2]);
+    const x = sx(birth), y = sy(death);
+    const pers = death - birth;
+    const r = Math.max(3, Math.min(8, 2 + pers * 12));
+    const color = colors[dim] || "#22c55e";
+
+    // Glow
+    const grd = ctx.createRadialGradient(x, y, 0, x, y, r + 6);
+    grd.addColorStop(0, color + "44");
+    grd.addColorStop(1, "transparent");
+    ctx.beginPath();
+    ctx.arc(x, y, r + 6, 0, Math.PI * 2);
+    ctx.fillStyle = grd;
+    ctx.fill();
+
+    // Dot
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  });
+
+  // Axis tick labels
+  ctx.fillStyle = "rgba(255,255,255,0.2)";
+  ctx.font = "10px 'JetBrains Mono', monospace";
+  ctx.textAlign = "center";
+  ctx.fillText(minV.toFixed(2), pad, H - pad + 14);
+  ctx.fillText(maxV.toFixed(2), pad + plotSize, H - pad + 14);
+  ctx.textAlign = "right";
+  ctx.fillText(minV.toFixed(2), pad - 4, H - pad);
+  ctx.fillText(maxV.toFixed(2), pad - 4, pad + 4);
+
+  // Legend
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#6366f1";
+  ctx.beginPath(); ctx.arc(W - 110, 18, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.35)";
+  ctx.fillText("H\u2080 basins", W - 100, 22);
+  ctx.fillStyle = "#ec4899";
+  ctx.beginPath(); ctx.arc(W - 110, 34, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.35)";
+  ctx.fillText("H\u2081 saddles", W - 100, 38);
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   initCharts();
   trySSEConnection();

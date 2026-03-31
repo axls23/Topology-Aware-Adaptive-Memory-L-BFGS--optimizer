@@ -1,14 +1,19 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ta-LBFGS Optimizer — Topology-Aware Adaptive Memory</title>
-  <meta name="description" content="Interactive dashboard for the Topology-Aware Adaptive Memory L-BFGS Optimizer. Visualize convergence, topology metrics, and hyperparameter evolution in real-time.">
+  <meta name="description"
+    content="Interactive dashboard for the Topology-Aware Adaptive Memory L-BFGS Optimizer. Visualize convergence, topology metrics, and hyperparameter evolution in real-time.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
+
 <body>
   <!-- Animated background particles -->
   <canvas id="bgCanvas"></canvas>
@@ -18,7 +23,21 @@
     <div class="topnav-left">
       <div class="logo">
         <div class="logo-icon">
-          <svg viewBox="0 0 32 32" fill="none"><path d="M16 2L2 9v14l14 7 14-7V9L16 2z" stroke="url(#lg1)" stroke-width="2" fill="none"/><path d="M16 8l-8 4v8l8 4 8-4v-8l-8-4z" fill="url(#lg2)" opacity="0.3"/><circle cx="16" cy="16" r="3" fill="url(#lg1)"/><defs><linearGradient id="lg1" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#6366f1"/><stop offset="1" stop-color="#a855f7"/></linearGradient><linearGradient id="lg2" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#6366f1"/><stop offset="1" stop-color="#ec4899"/></linearGradient></defs></svg>
+          <svg viewBox="0 0 32 32" fill="none">
+            <path d="M16 2L2 9v14l14 7 14-7V9L16 2z" stroke="url(#lg1)" stroke-width="2" fill="none" />
+            <path d="M16 8l-8 4v8l8 4 8-4v-8l-8-4z" fill="url(#lg2)" opacity="0.3" />
+            <circle cx="16" cy="16" r="3" fill="url(#lg1)" />
+            <defs>
+              <linearGradient id="lg1" x1="0" y1="0" x2="32" y2="32">
+                <stop stop-color="#6366f1" />
+                <stop offset="1" stop-color="#a855f7" />
+              </linearGradient>
+              <linearGradient id="lg2" x1="0" y1="0" x2="32" y2="32">
+                <stop stop-color="#6366f1" />
+                <stop offset="1" stop-color="#ec4899" />
+              </linearGradient>
+            </defs>
+          </svg>
         </div>
         <span class="logo-text">ta-LBFGS</span>
         <span class="logo-badge">v0.1</span>
@@ -38,7 +57,9 @@
         <span class="status-text">Standalone</span>
       </div>
       <a href="#dashboard" class="btn-run" id="btnRun">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M8 5v14l11-7z" />
+        </svg>
         Live Dashboard
       </a>
     </div>
@@ -59,11 +80,19 @@
       </p>
       <div class="hero-actions">
         <a href="#dashboard" class="btn btn-primary">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7" rx="1" />
+            <rect x="14" y="3" width="7" height="7" rx="1" />
+            <rect x="3" y="14" width="7" height="7" rx="1" />
+            <rect x="14" y="14" width="7" height="7" rx="1" />
+          </svg>
           Open Dashboard
         </a>
         <a href="#algorithm" class="btn btn-secondary">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+            <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+          </svg>
           Learn More
         </a>
       </div>
@@ -96,50 +125,76 @@
     <div class="section-header">
       <span class="section-badge">Core Capabilities</span>
       <h2 class="section-title">Why ta-LBFGS?</h2>
-      <p class="section-subtitle">Traditional L-BFGS uses fixed memory and ignores the landscape structure. We fix that.</p>
+      <p class="section-subtitle">Traditional L-BFGS uses fixed memory and ignores the landscape structure. We fix that.
+      </p>
     </div>
     <div class="features-grid">
       <div class="feature-card" style="--delay:0">
         <div class="feature-icon" style="--accent:#6366f1">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><line x1="2" y1="12" x2="22" y2="12"/></svg>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+            <line x1="2" y1="12" x2="22" y2="12" />
+          </svg>
         </div>
         <h3>Topology Awareness</h3>
-        <p>Analyzes gradient landscape structure via condition number estimation and Euler characteristic to identify meaningful curvature regions.</p>
+        <p>Analyzes gradient landscape structure via condition number estimation and Euler characteristic to identify
+          meaningful curvature regions.</p>
       </div>
       <div class="feature-card" style="--delay:1">
         <div class="feature-icon" style="--accent:#a855f7">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path
+              d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" />
+          </svg>
         </div>
         <h3>Adaptive Memory</h3>
-        <p>Dynamically resizes the curvature buffer per-layer: more memory for ill-conditioned regions, less for well-behaved zones.</p>
+        <p>Dynamically resizes the curvature buffer per-layer: more memory for ill-conditioned regions, less for
+          well-behaved zones.</p>
       </div>
       <div class="feature-card" style="--delay:2">
         <div class="feature-icon" style="--accent:#ec4899">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          </svg>
         </div>
         <h3>Saddle Evasion</h3>
-        <p>Detects saddle points via Lanczos eigenvalue probes and escapes with eigenvector-directed perturbations satisfying Zoutendijk descent.</p>
+        <p>Detects saddle points via Lanczos eigenvalue probes and escapes with eigenvector-directed perturbations
+          satisfying Zoutendijk descent.</p>
       </div>
       <div class="feature-card" style="--delay:3">
         <div class="feature-icon" style="--accent:#14b8a6">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+          </svg>
         </div>
         <h3>Bilevel Optimization</h3>
-        <p>Supports bilevel hyperparameter tuning with differentiable per-layer learning rates, weight decay, dropout, and attention temperature.</p>
+        <p>Supports bilevel hyperparameter tuning with differentiable per-layer learning rates, weight decay, dropout,
+          and attention temperature.</p>
       </div>
       <div class="feature-card" style="--delay:4">
         <div class="feature-icon" style="--accent:#f59e0b">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="7" width="20" height="14" rx="2" ry="2" />
+            <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16" />
+          </svg>
         </div>
         <h3>HF Integration</h3>
-        <p>Plug-and-play with Hugging Face transformers. Fine-tune real LLMs like Qwen 2.5 and GPT-2 with topology-aware second-order methods.</p>
+        <p>Plug-and-play with Hugging Face transformers. Fine-tune real LLMs like Qwen 2.5 and GPT-2 with topology-aware
+          second-order methods.</p>
       </div>
       <div class="feature-card" style="--delay:5">
         <div class="feature-icon" style="--accent:#10b981">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path
+              d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+            <line x1="12" y1="22.08" x2="12" y2="12" />
+          </svg>
         </div>
         <h3>3D Trajectory Viz</h3>
-        <p>Real-time PCA-projected trajectory visualization with adaptive landscape mesh, pivot markers, and spectral guard events.</p>
+        <p>Real-time PCA-projected trajectory visualization with adaptive landscape mesh, pivot markers, and spectral
+          guard events.</p>
       </div>
     </div>
   </section>
@@ -208,11 +263,16 @@
     </div>
     <div class="dashboard-controls">
       <button class="btn btn-primary" id="btnStartSim" onclick="startSimulation()">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M8 5v14l11-7z" />
+        </svg>
         Start Simulation
       </button>
       <button class="btn btn-secondary" id="btnResetSim" onclick="resetSimulation()">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="1 4 1 10 7 10" />
+          <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+        </svg>
         Reset
       </button>
       <div class="sim-status" id="simStatus">Ready</div>
@@ -228,7 +288,9 @@
       <div class="dash-metric-card">
         <div class="dash-metric-label">Outer Step</div>
         <div class="dash-metric-value" id="dStep">0 / 40</div>
-        <div class="dash-metric-bar"><div class="dash-metric-fill" id="dStepFill"></div></div>
+        <div class="dash-metric-bar">
+          <div class="dash-metric-fill" id="dStepFill"></div>
+        </div>
       </div>
       <div class="dash-metric-card">
         <div class="dash-metric-label">Mean κ (Condition)</div>
@@ -328,10 +390,16 @@
       </div>
       <div class="topo3d-controls">
         <button class="topo3d-ctrl-btn" id="btnAutoRotate" onclick="toggleAutoRotate()" title="Toggle auto-rotation">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
+          </svg>
         </button>
         <button class="topo3d-ctrl-btn" id="btnResetCamera" onclick="resetTopoCamera()" title="Reset camera">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4m10-10h-4M6 12H2m15.07-5.07l-2.83 2.83M9.76 14.24l-2.83 2.83m0-10.14l2.83 2.83m4.48 4.48l2.83 2.83"/></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3" />
+            <path
+              d="M12 2v4m0 12v4m10-10h-4M6 12H2m15.07-5.07l-2.83 2.83M9.76 14.24l-2.83 2.83m0-10.14l2.83 2.83m4.48 4.48l2.83 2.83" />
+          </svg>
         </button>
       </div>
     </div>
@@ -339,6 +407,48 @@
     <!-- Field Legend -->
     <div class="topo3d-legend" id="topo3dLegend">
       <!-- Populated dynamically per field -->
+    </div>
+
+    <!-- Persistent Homology Diagram -->
+    <div class="persistence-panel" id="persistencePanel">
+      <div class="persistence-header">
+        <div class="persistence-title">
+          <span class="section-badge" style="margin-bottom:0">Persistent Homology</span>
+          <h3 style="margin:8px 0 4px;font-size:1.1rem;color:var(--text-primary,#f1f5f9)">Birth–Death Diagram</h3>
+          <p style="font-size:0.75rem;color:var(--text-muted,#94a3b8);margin:0">Topological features of the gradient
+            landscape · Updated every 10 steps</p>
+        </div>
+        <div class="persistence-stats">
+          <div class="persistence-stat">
+            <span class="persistence-stat-value" id="pBetti0">—</span>
+            <span class="persistence-stat-label">β₀ basins</span>
+          </div>
+          <div class="persistence-stat">
+            <span class="persistence-stat-value" id="pBetti1">—</span>
+            <span class="persistence-stat-label">β₁ saddles</span>
+          </div>
+          <div class="persistence-stat">
+            <span class="persistence-stat-value" id="pMaxPers">—</span>
+            <span class="persistence-stat-label">max pers.</span>
+          </div>
+          <div class="persistence-stat">
+            <span class="persistence-stat-value" id="pSaddleCount">—</span>
+            <span class="persistence-stat-label">saddle count</span>
+          </div>
+        </div>
+      </div>
+      <div class="persistence-canvas-wrap">
+        <canvas id="persistenceCanvas" width="600" height="400"></canvas>
+        <div class="persistence-axis-label persistence-axis-x">Birth →</div>
+        <div class="persistence-axis-label persistence-axis-y">← Death</div>
+      </div>
+      <div class="persistence-energy-bar">
+        <span style="font-size:0.7rem;color:var(--text-muted,#94a3b8)">Topological Energy</span>
+        <div class="persistence-energy-track">
+          <div class="persistence-energy-fill" id="pEnergyFill" style="width:0%"></div>
+        </div>
+        <span class="persistence-energy-value" id="pEnergyVal">0.00</span>
+      </div>
     </div>
   </section>
 
@@ -353,41 +463,124 @@
       <div class="bench-card">
         <h4>Convergence Speed</h4>
         <div class="bench-bars">
-          <div class="bench-bar-row"><span class="bench-label">ta-LBFGS</span><div class="bench-track"><div class="bench-fill bench-fill-1" style="width:92%">92%</div></div></div>
-          <div class="bench-bar-row"><span class="bench-label">L-BFGS</span><div class="bench-track"><div class="bench-fill bench-fill-2" style="width:68%">68%</div></div></div>
-          <div class="bench-bar-row"><span class="bench-label">Adam</span><div class="bench-track"><div class="bench-fill bench-fill-3" style="width:55%">55%</div></div></div>
-          <div class="bench-bar-row"><span class="bench-label">SGD</span><div class="bench-track"><div class="bench-fill bench-fill-4" style="width:34%">34%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">ta-LBFGS</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-1" style="width:92%">92%</div>
+            </div>
+          </div>
+          <div class="bench-bar-row"><span class="bench-label">L-BFGS</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-2" style="width:68%">68%</div>
+            </div>
+          </div>
+          <div class="bench-bar-row"><span class="bench-label">Adam</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-3" style="width:55%">55%</div>
+            </div>
+          </div>
+          <div class="bench-bar-row"><span class="bench-label">SGD</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-4" style="width:34%">34%</div>
+            </div>
+          </div>
         </div>
       </div>
       <div class="bench-card">
         <h4>Stability Score</h4>
         <div class="bench-bars">
-          <div class="bench-bar-row"><span class="bench-label">ta-LBFGS</span><div class="bench-track"><div class="bench-fill bench-fill-1" style="width:95%">95%</div></div></div>
-          <div class="bench-bar-row"><span class="bench-label">L-BFGS</span><div class="bench-track"><div class="bench-fill bench-fill-2" style="width:60%">60%</div></div></div>
-          <div class="bench-bar-row"><span class="bench-label">Adam</span><div class="bench-track"><div class="bench-fill bench-fill-3" style="width:78%">78%</div></div></div>
-          <div class="bench-bar-row"><span class="bench-label">SGD</span><div class="bench-track"><div class="bench-fill bench-fill-4" style="width:72%">72%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">ta-LBFGS</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-1" style="width:95%">95%</div>
+            </div>
+          </div>
+          <div class="bench-bar-row"><span class="bench-label">L-BFGS</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-2" style="width:60%">60%</div>
+            </div>
+          </div>
+          <div class="bench-bar-row"><span class="bench-label">Adam</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-3" style="width:78%">78%</div>
+            </div>
+          </div>
+          <div class="bench-bar-row"><span class="bench-label">SGD</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-4" style="width:72%">72%</div>
+            </div>
+          </div>
         </div>
       </div>
       <div class="bench-card">
         <h4>Memory Efficiency</h4>
         <div class="bench-bars">
-          <div class="bench-bar-row"><span class="bench-label">ta-LBFGS</span><div class="bench-track"><div class="bench-fill bench-fill-1" style="width:88%">88%</div></div></div>
-          <div class="bench-bar-row"><span class="bench-label">L-BFGS</span><div class="bench-track"><div class="bench-fill bench-fill-2" style="width:50%">50%</div></div></div>
-          <div class="bench-bar-row"><span class="bench-label">Adam</span><div class="bench-track"><div class="bench-fill bench-fill-3" style="width:82%">82%</div></div></div>
-          <div class="bench-bar-row"><span class="bench-label">SGD</span><div class="bench-track"><div class="bench-fill bench-fill-4" style="width:95%">95%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">ta-LBFGS</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-1" style="width:88%">88%</div>
+            </div>
+          </div>
+          <div class="bench-bar-row"><span class="bench-label">L-BFGS</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-2" style="width:50%">50%</div>
+            </div>
+          </div>
+          <div class="bench-bar-row"><span class="bench-label">Adam</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-3" style="width:82%">82%</div>
+            </div>
+          </div>
+          <div class="bench-bar-row"><span class="bench-label">SGD</span>
+            <div class="bench-track">
+              <div class="bench-fill bench-fill-4" style="width:95%">95%</div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
     <div class="bench-table-wrap">
       <table class="bench-table">
         <thead>
-          <tr><th>Optimizer</th><th>Final Loss</th><th>Steps to ε=0.01</th><th>Saddle Escapes</th><th>Memory (pairs)</th><th>Stability</th></tr>
+          <tr>
+            <th>Optimizer</th>
+            <th>Final Loss</th>
+            <th>Steps to ε=0.01</th>
+            <th>Saddle Escapes</th>
+            <th>Memory (pairs)</th>
+            <th>Stability</th>
+          </tr>
         </thead>
         <tbody>
-          <tr class="bench-highlight"><td>ta-LBFGS</td><td>0.0034</td><td>18</td><td>3/3 ✓</td><td>3–20 (adaptive)</td><td>★★★★★</td></tr>
-          <tr><td>L-BFGS (fixed m=10)</td><td>0.0089</td><td>32</td><td>1/3</td><td>10 (fixed)</td><td>★★★☆☆</td></tr>
-          <tr><td>Adam (lr=1e-3)</td><td>0.0156</td><td>45</td><td>2/3</td><td>2× per param (m, v)</td><td>★★★★☆</td></tr>
-          <tr><td>SGD (lr=0.1)</td><td>0.0412</td><td>78</td><td>0/3</td><td>1× momentum buf</td><td>★★★★☆</td></tr>
+          <tr class="bench-highlight">
+            <td>ta-LBFGS</td>
+            <td>0.0034</td>
+            <td>18</td>
+            <td>3/3 ✓</td>
+            <td>3–20 (adaptive)</td>
+            <td>★★★★★</td>
+          </tr>
+          <tr>
+            <td>L-BFGS (fixed m=10)</td>
+            <td>0.0089</td>
+            <td>32</td>
+            <td>1/3</td>
+            <td>10 (fixed)</td>
+            <td>★★★☆☆</td>
+          </tr>
+          <tr>
+            <td>Adam (lr=1e-3)</td>
+            <td>0.0156</td>
+            <td>45</td>
+            <td>2/3</td>
+            <td>2× per param (m, v)</td>
+            <td>★★★★☆</td>
+          </tr>
+          <tr>
+            <td>SGD (lr=0.1)</td>
+            <td>0.0412</td>
+            <td>78</td>
+            <td>0/3</td>
+            <td>1× momentum buf</td>
+            <td>★★★★☆</td>
+          </tr>
         </tbody>
       </table>
     </div>
@@ -427,4 +620,5 @@
   <script src="app.js"></script>
   <script type="module" src="topology3d.js"></script>
 </body>
+
 </html>

@@ -39,7 +39,7 @@ class TaLBFGSConfig:
 
     # ── Bilevel Optimization ─────────────────────────────────────────
     inner_steps: int = 10
-    outer_steps: int = 50
+    outer_steps: int = 10000
     inner_optimizer: str = "SGD"  # inner loop optimizer for model weights
     inner_lr: float = 1e-3
     # ADDS: explicit inner-loop L2 regularization for IFT stability.

@@ -39,7 +39,7 @@ def check_secant_condition(
     def rank1_two_loop(v: torch.Tensor) -> torch.Tensor:
         return y * (torch.dot(s, v) / denom)
 
-    is_saddle, _ = is_saddle_point(rank1_two_loop, dim=int(s.numel()), eps=threshold)
+    is_saddle, _, _ = is_saddle_point(rank1_two_loop, dim=int(s.numel()), eps=threshold)
     return is_saddle
 
 
@@ -49,8 +49,8 @@ def is_saddle_point(
     two_loop_fn: Callable[[torch.Tensor], torch.Tensor],
     dim: int,
     eps: float = 1e-4,
-) -> Tuple[bool, torch.Tensor]:
-    """3-step Lanczos min-eigenvalue probe. Returns (is_saddle, min_eigvec)."""
+) -> Tuple[bool, torch.Tensor, int]:
+    """3-step Lanczos min-eigenvalue probe. Returns (is_saddle, min_eigvec, morse_index)."""
     q = torch.randn(dim)
     q = q / q.norm().clamp(min=1e-12)
     q_prev = torch.zeros_like(q)
@@ -84,18 +84,21 @@ def is_saddle_point(
 
     eigvals, eigvecs = torch.linalg.eigh(T)
     lam_min = float(eigvals[0].item())
+    morse_index = int(torch.sum(eigvals < -eps).item())
+    
     coeffs = eigvecs[:, 0]
     min_vec = torch.zeros_like(basis[0])
     for i in range(m):
         min_vec = min_vec + coeffs[i] * basis[i]
     min_vec = min_vec / min_vec.norm().clamp(min=1e-12)
-    return lam_min <= eps, min_vec
+    return lam_min <= eps, min_vec, morse_index
 
 
 def detect_topology_break(
     recent_gradients: torch.Tensor,
     distance_threshold: float = 0.5,
     prev_chi: Optional[int] = None,
+    active_subspace: Optional[torch.Tensor] = None,
 ) -> Dict:
     """
     Detect structural breaks in gradient space via Euler Characteristic.
@@ -123,7 +126,10 @@ def detect_topology_break(
             "topology_break_detected": False,
             "should_perturb": False,
         }
-
+    if active_subspace is not None:
+        # Project gradients onto the active subspace PCA vectors to prevent projection distortion
+        recent_gradients = recent_gradients @ active_subspace.T
+        
     grads_np = recent_gradients.float().detach().cpu().numpy()
 
     # Pairwise L2 distances

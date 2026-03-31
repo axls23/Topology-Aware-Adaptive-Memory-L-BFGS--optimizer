@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<VTKFile type="PolyData" version="0.1" byte_order="LittleEndian">
+  <PolyData>
+    <Piece NumberOfPoints="24" NumberOfVerts="0" NumberOfLines="1" NumberOfStrips="0" NumberOfPolys="0">
+      <Points>
+        <DataArray type="Float64" NumberOfComponents="3" format="ascii">
+          0.0 5.49256042e+00 0.0 1.0 4.41437806e+00 0.0 2.0 1.71422366e+01 0.0 3.0 1.25267932e+01 0.0 4.0 5.56638920e+00 0.0 5.0 5.19837217e+00 0.0 6.0 4.63448356e+00 0.0 7.0 4.29396955e+00 0.0 8.0 4.63777373e+00 0.0 9.0 4.62456594e+00 0.0 10.0 4.63058395e+00 0.0 11.0 5.36698569e+00 0.0 12.0 4.53825862e+00 0.0 13.0 4.16480609e+00 0.0 14.0 4.18657844e+00 0.0 15.0 3.78794314e+00 0.0 16.0 5.06844445e+00 0.0 17.0 4.04494901e+00 0.0 18.0 3.24830650e+00 0.0 19.0 3.97994251e+00 0.0 20.0 4.28941353e+00 0.0 21.0 1.47045538e+01 0.0 22.0 3.70107974e+00 0.0 23.0 8.38059985e+00 0.0 
+        </DataArray>
+      </Points>
+      <PointData Scalars="Drift">
+        <DataArray type="Float64" Name="Drift" format="ascii">
+          5.49256042e+00 4.41437806e+00 1.71422366e+01 1.25267932e+01 5.56638920e+00 5.19837217e+00 4.63448356e+00 4.29396955e+00 4.63777373e+00 4.62456594e+00 4.63058395e+00 5.36698569e+00 4.53825862e+00 4.16480609e+00 4.18657844e+00 3.78794314e+00 5.06844445e+00 4.04494901e+00 3.24830650e+00 3.97994251e+00 4.28941353e+00 1.47045538e+01 3.70107974e+00 8.38059985e+00
+        </DataArray>
+      </PointData>
+      <Lines>
+        <DataArray type="Int32" Name="connectivity" format="ascii">
+          0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+        </DataArray>
+        <DataArray type="Int32" Name="offsets" format="ascii">
+          24
+        </DataArray>
+      </Lines>
+    </Piece>
+  </PolyData>
+</VTKFile>

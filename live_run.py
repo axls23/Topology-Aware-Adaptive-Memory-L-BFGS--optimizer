@@ -27,6 +27,16 @@ from ta_lbfgs.dashboard.landscape_viz import (
     generate_landscape_mesh,
     reset_adaptive_mesh,
 )
+from ta_lbfgs.topology.persistent_homology import (
+    compute_pointcloud_persistence,
+    persistence_to_payload,
+    is_available as persistence_available,
+)
+from ta_lbfgs.topology.vtk_exporter import (
+    export_loss_grid_vti,
+    export_residual_drift_vtp,
+    export_persistence_diagram_json,
+)
 from ta_lbfgs.training.data_preprocessing import (
     get_default_cache_path,
     get_default_dataset_path,
@@ -236,22 +246,18 @@ class HFGradientEvaluator:
         self.batch_size = max(1, batch_size)
 
         if model_path is None:
-            model_path = (
-                "~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B/"
-                "snapshots/060db6499f32faf8b98477b0a26969ef7d8b9987"
-            )
+            model_path = "Qwen/Qwen2.5-0.5B"
 
         resolved = model_path
         if resolved.startswith("~"):
             import os
             resolved = os.path.expanduser(resolved)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(resolved, local_files_only=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(resolved)
         self.model = AutoModelForCausalLM.from_pretrained(
             resolved,
-            local_files_only=True,
-            torch_dtype=torch.float32,
-        ).to(self.device)
+            device_map="auto",
+        )
         self.model.train()
 
         if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
@@ -424,8 +430,12 @@ def run_live(
     layer_kappa_histories: Dict[str, List[float]] = {f"block.{i}": [] for i in range(n_layers)}
     prev_grad_sketch: Dict[str, torch.Tensor] = {}
     topology_components_history: List[np.ndarray] = []
+    persistence_payload: Dict[str, Any] = {}  # latest persistence diagram data
+    persistence_compute_interval = 1  # compute persistence every N steps
+    vtk_export_interval = 1  # export VTK files every N steps
     
     def optimization_task():
+        nonlocal persistence_payload
         best_loss = float("inf")
         pivot_steps: List[int] = []
         spectral_guard_steps: List[int] = []
@@ -577,6 +587,34 @@ def run_live(
                     )
                 )
 
+                # ── Persistent Homology (every N steps) ──────────────
+                if persistence_available() and (outer_iter % persistence_compute_interval == 0):
+                    try:
+                        # Collect gradient sketches as a point cloud
+                        grad_points = []
+                        for name in sorted(layer_data.keys()):
+                            hist = layer_grad_histories.get(name, [])
+                            if hist and len(hist) >= 3:
+                                stacked = torch.stack(hist[-min(len(hist), 20):]).numpy()
+                                grad_points.append(stacked)
+                        if grad_points:
+                            point_cloud = np.vstack(grad_points)
+                            diagram = compute_pointcloud_persistence(
+                                point_cloud, homology_dimensions=(0, 1)
+                            )
+                            persistence_payload = persistence_to_payload(diagram)
+                            persistence_payload["step"] = outer_iter
+                            event_feed.append(
+                                f"step {outer_iter + 1}: persistence β₀={persistence_payload['betti'].get(0, 0)} "
+                                f"β₁={persistence_payload['betti'].get(1, 0)} "
+                                f"saddles={persistence_payload['saddle_count']}"
+                            )
+                    except Exception as exc:
+                        import traceback
+                        traceback.print_exc()
+                        event_feed.append(f"step {outer_iter + 1}: persistence error: {exc}")
+
+
                 if len(event_feed) > 100:
                     event_feed = event_feed[-100:]
                 if len(chat_messages) > 60:
@@ -589,6 +627,29 @@ def run_live(
                 landscape_mesh = generate_landscape_mesh(
                     None, hyperparams, layer_curvature=layer_data, loss=loss_val
                 )
+
+                # ── VTK Export for offline TTK analysis ───────────────
+                if outer_iter >= 0 and outer_iter % vtk_export_interval == 0:
+                    try:
+                        layer_norms = np.array([
+                            float(layer_data[f"block.{i}"].get("grad_norm", 0.0))
+                            for i in range(n_layers)
+                        ])
+                        export_residual_drift_vtp(layer_norms, outer_iter)
+                        
+                        # Export the 2D loss grid for TTK landscape analysis
+                        if len(landscape_mesh) == 3:
+                            export_loss_grid_vti(landscape_mesh[2], outer_iter)
+                            
+                        if persistence_payload.get("diagram"):
+                            export_persistence_diagram_json(
+                                np.array(persistence_payload["diagram"]),
+                                outer_iter,
+                            )
+                    except Exception as e:
+                        import traceback
+                        traceback.print_exc()
+                        event_feed.append(f"VTK export error at step {outer_iter}: {e}")
 
                 if dashboard:
                     dashboard.call_from_thread(
@@ -649,6 +710,7 @@ def run_live(
                                 topology_components_history,
                                 layer_names=layer_names_sorted,
                             ),
+                            "persistence": persistence_payload if persistence_payload else None,
                             "chat": {
                                 "messages": chat_messages,
                                 "pending_prompt_count": web_dashboard.pending_prompt_count(),
@@ -722,6 +784,8 @@ def run_live(
             if dashboard:
                 dashboard.call_from_thread(dashboard.update_log, f"[bold red]Live run error:[/] {e}")
             else:
+                import traceback
+                traceback.print_exc()
                 print(f"[live_run] error: {e}")
             if web_dashboard is not None:
                 final_layer_names = [f"block.{i}" for i in range(n_layers)]

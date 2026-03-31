@@ -7,6 +7,7 @@ Serves ui.html and streams optimizer snapshots to the browser.
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import queue
 import threading
@@ -15,6 +16,20 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+
+
+_WEB_UI_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "web-ui")
+)
+
+_MIME_MAP = {
+    ".js": "application/javascript",
+    ".css": "text/css",
+    ".html": "text/html",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+}
 
 
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
@@ -88,6 +103,36 @@ class DashboardServer:
                 },
             },
             "events": [],
+            "topology_3d": {
+                "landscape_field": {
+                    "kappa_grid": [],
+                    "status_grid": [],
+                    "evasion_events": [],
+                    "memory_sizes": [],
+                },
+                "attention_field": {
+                    "masks_summary": {},
+                    "head_types": {},
+                    "active_rederive": False,
+                },
+                "expert_field": {
+                    "nodes": [],
+                    "edges": [],
+                    "buffer_sizes": [],
+                },
+                "residual_field": {
+                    "jacobian_matrix": [],
+                    "coupled_zones": [],
+                    "hessian_strategies": [],
+                },
+                "chain_field": {
+                    "grad_norms": [],
+                    "segments": [],
+                    "window_scales": [],
+                    "pivot_indices": [],
+                    "topology_valid": False,
+                },
+            },
         }
 
     def start(self) -> None:
@@ -111,6 +156,9 @@ class DashboardServer:
                     return
                 if path == "/state":
                     self._serve_state()
+                    return
+                if path.startswith("/static/"):
+                    self._serve_static(path[len("/static/"):])
                     return
 
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
@@ -181,6 +229,26 @@ class DashboardServer:
                     with server._clients_lock:
                         if client in server._clients:
                             server._clients.remove(client)
+
+            def _serve_static(self, rel_path: str) -> None:
+                safe = os.path.normpath(os.path.join(_WEB_UI_DIR, rel_path))
+                if not safe.startswith(_WEB_UI_DIR):
+                    self.send_error(HTTPStatus.FORBIDDEN, "Forbidden")
+                    return
+                try:
+                    with open(safe, "rb") as f:
+                        body = f.read()
+                except OSError:
+                    self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+                    return
+                ext = os.path.splitext(safe)[1].lower()
+                ctype = _MIME_MAP.get(ext, mimetypes.guess_type(safe)[0] or "application/octet-stream")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(body)
 
             def _select_head(self) -> None:
                 content_len = int(self.headers.get("Content-Length", "0"))

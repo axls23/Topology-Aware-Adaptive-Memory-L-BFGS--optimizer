@@ -29,6 +29,7 @@
       <a href="#features" class="nav-link" data-section="features">Features</a>
       <a href="#algorithm" class="nav-link" data-section="algorithm">Algorithm</a>
       <a href="#dashboard" class="nav-link" data-section="dashboard">Dashboard</a>
+      <a href="#topology-3d" class="nav-link" data-section="topology-3d">3D Topology</a>
       <a href="#benchmark" class="nav-link" data-section="benchmark">Benchmarks</a>
     </div>
     <div class="topnav-right">
@@ -292,6 +293,55 @@
     </div>
   </section>
 
+  <!-- 3D Topology Fields Section -->
+  <section id="topology-3d" class="section">
+    <div class="section-header">
+      <span class="section-badge">Evolving 3D Fields</span>
+      <h2 class="section-title">Topology Field Visualizations</h2>
+      <p class="section-subtitle">Five topology axes rendered as interactive 3D fields evolving with the optimizer</p>
+    </div>
+
+    <!-- Tab Navigation -->
+    <div class="topo3d-tabs" id="topo3dTabs">
+      <button class="topo3d-tab active" data-field="landscape" onclick="switchTopoField('landscape')">
+        <span class="topo3d-tab-icon">&#9650;</span> Landscape Curvature
+      </button>
+      <button class="topo3d-tab" data-field="attention" onclick="switchTopoField('attention')">
+        <span class="topo3d-tab-icon">&#9673;</span> Attention Topology
+      </button>
+      <button class="topo3d-tab" data-field="expert" onclick="switchTopoField('expert')">
+        <span class="topo3d-tab-icon">&#9734;</span> Expert Routing
+      </button>
+      <button class="topo3d-tab" data-field="residual" onclick="switchTopoField('residual')">
+        <span class="topo3d-tab-icon">&#9632;</span> Residual Coupling
+      </button>
+      <button class="topo3d-tab" data-field="chain" onclick="switchTopoField('chain')">
+        <span class="topo3d-tab-icon">&#8605;</span> Reasoning Chain
+      </button>
+    </div>
+
+    <!-- 3D Canvas Container -->
+    <div class="topo3d-container" id="topo3dContainer">
+      <canvas id="topo3dCanvas"></canvas>
+      <div class="topo3d-overlay" id="topo3dOverlay">
+        <div class="topo3d-info" id="topo3dInfo">Initializing 3D renderer...</div>
+      </div>
+      <div class="topo3d-controls">
+        <button class="topo3d-ctrl-btn" id="btnAutoRotate" onclick="toggleAutoRotate()" title="Toggle auto-rotation">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+        </button>
+        <button class="topo3d-ctrl-btn" id="btnResetCamera" onclick="resetTopoCamera()" title="Reset camera">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4m10-10h-4M6 12H2m15.07-5.07l-2.83 2.83M9.76 14.24l-2.83 2.83m0-10.14l2.83 2.83m4.48 4.48l2.83 2.83"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Field Legend -->
+    <div class="topo3d-legend" id="topo3dLegend">
+      <!-- Populated dynamically per field -->
+    </div>
+  </section>
+
   <!-- Benchmark Section -->
   <section id="benchmark" class="section section-dark">
     <div class="section-header">
@@ -365,6 +415,16 @@
     </div>
   </footer>
 
+  <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.168.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.168.0/examples/jsm/"
+    }
+  }
+  </script>
   <script src="app.js"></script>
+  <script type="module" src="topology3d.js"></script>
 </body>
 </html>

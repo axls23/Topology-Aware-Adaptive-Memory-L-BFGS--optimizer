@@ -442,8 +442,78 @@ body {
   color: var(--accent-2); margin-bottom: 4px;
 }
 
+/* ── 3D Topology Fields ──────────────────────────────────── */
+.topo3d-tabs {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  margin-bottom: 16px; padding: 4px;
+  background: var(--bg-secondary); border-radius: 12px;
+  border: 1px solid var(--border);
+}
+.topo3d-tab {
+  flex: 1; min-width: 140px; padding: 10px 16px;
+  background: transparent; border: 1px solid transparent;
+  border-radius: 8px; color: var(--text-secondary);
+  font-family: var(--font-sans); font-size: 13px; font-weight: 500;
+  cursor: pointer; transition: all 0.2s ease;
+  display: flex; align-items: center; gap: 6px; justify-content: center;
+}
+.topo3d-tab:hover { color: var(--text-primary); background: var(--surface); }
+.topo3d-tab.active {
+  background: linear-gradient(135deg, rgba(99,102,241,0.2), rgba(168,85,247,0.15));
+  border-color: rgba(99,102,241,0.3); color: var(--text-primary);
+  box-shadow: 0 0 20px rgba(99,102,241,0.1);
+}
+.topo3d-tab-icon { font-size: 14px; opacity: 0.7; }
+.topo3d-tab.active .topo3d-tab-icon { opacity: 1; }
+
+.topo3d-container {
+  position: relative; width: 100%; height: 520px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border); border-radius: 12px;
+  overflow: hidden;
+}
+.topo3d-container canvas {
+  width: 100% !important; height: 100% !important;
+  display: block; border-radius: 12px;
+}
+.topo3d-overlay {
+  position: absolute; top: 12px; left: 12px;
+  pointer-events: none; z-index: 2;
+}
+.topo3d-info {
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--text-muted); background: rgba(9,9,11,0.7);
+  padding: 6px 10px; border-radius: 6px;
+  backdrop-filter: blur(8px); border: 1px solid var(--border);
+}
+.topo3d-controls {
+  position: absolute; top: 12px; right: 12px;
+  display: flex; gap: 6px; z-index: 2;
+}
+.topo3d-ctrl-btn {
+  width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+  background: rgba(9,9,11,0.7); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text-secondary); cursor: pointer;
+  backdrop-filter: blur(8px); transition: all 0.2s;
+}
+.topo3d-ctrl-btn:hover { color: var(--text-primary); border-color: var(--accent-1); }
+.topo3d-ctrl-btn.active { color: var(--accent-1); border-color: var(--accent-1); background: rgba(99,102,241,0.1); }
+
+.topo3d-legend {
+  display: flex; gap: 16px; flex-wrap: wrap;
+  margin-top: 12px; padding: 10px 16px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; font-size: 12px; color: var(--text-secondary);
+}
+.topo3d-legend-item {
+  display: flex; align-items: center; gap: 6px;
+}
+.topo3d-legend-dot {
+  width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+}
+
 /* ── Canvas Charts ──────────────────────────────────────── */
-canvas { width: 100% !important; border-radius: 8px; }
+canvas:not(#topo3dCanvas) { width: 100% !important; border-radius: 8px; }
 
 /* ── Responsive ──────────────────────────────────────────── */
 @media (max-width: 1024px) {

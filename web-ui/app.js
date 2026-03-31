@@ -367,6 +367,11 @@ function simulateStep() {
 
   SIM.step++;
   updateDashboardUI();
+  
+  // Update 3D topology visualization with synthetic data
+  if (window.Topo3D && window.Topo3D.simulateStep) {
+    window.Topo3D.simulateStep(SIM.step);
+  }
 }
 
 function updateDashboardUI() {
@@ -488,6 +493,11 @@ function resetSimulation() {
   if (lossChart) lossChart.update([{ color: 'rgb(99,102,241)', data: [] }]);
   if (kappaChart) kappaChart.update([]);
   if (hpChart) hpChart.update([]);
+  
+  // Reset 3D topology visualization
+  if (window.Topo3D && window.Topo3D.simulateStep) {
+    window.Topo3D.simulateStep(0);
+  }
 }
 
 // ── SSE Connection (try connecting to real optimizer) ───────────
@@ -513,6 +523,10 @@ function trySSEConnection() {
         if (data.run) {
           dot.className = 'status-dot online';
           text.textContent = `Live — Step ${data.run.outer_step}`;
+        }
+        // Wire topology_3d data to Topo3D visualization
+        if (data.topology_3d && window.Topo3D && window.Topo3D.update) {
+          window.Topo3D.update(data.topology_3d);
         }
       } catch(e) {}
     };

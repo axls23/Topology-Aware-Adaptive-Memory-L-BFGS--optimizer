@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ta-LBFGS Optimizer — Topology-Aware Adaptive Memory</title>
+  <meta name="description" content="Interactive dashboard for the Topology-Aware Adaptive Memory L-BFGS Optimizer. Visualize convergence, topology metrics, and hyperparameter evolution in real-time.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Animated background particles -->
+  <canvas id="bgCanvas"></canvas>
+
+  <!-- Top Navigation -->
+  <nav class="topnav" id="topnav">
+    <div class="topnav-left">
+      <div class="logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 32 32" fill="none"><path d="M16 2L2 9v14l14 7 14-7V9L16 2z" stroke="url(#lg1)" stroke-width="2" fill="none"/><path d="M16 8l-8 4v8l8 4 8-4v-8l-8-4z" fill="url(#lg2)" opacity="0.3"/><circle cx="16" cy="16" r="3" fill="url(#lg1)"/><defs><linearGradient id="lg1" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#6366f1"/><stop offset="1" stop-color="#a855f7"/></linearGradient><linearGradient id="lg2" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#6366f1"/><stop offset="1" stop-color="#ec4899"/></linearGradient></defs></svg>
+        </div>
+        <span class="logo-text">ta-LBFGS</span>
+        <span class="logo-badge">v0.1</span>
+      </div>
+    </div>
+    <div class="topnav-center">
+      <a href="#hero" class="nav-link active" data-section="hero">Home</a>
+      <a href="#features" class="nav-link" data-section="features">Features</a>
+      <a href="#algorithm" class="nav-link" data-section="algorithm">Algorithm</a>
+      <a href="#dashboard" class="nav-link" data-section="dashboard">Dashboard</a>
+      <a href="#benchmark" class="nav-link" data-section="benchmark">Benchmarks</a>
+    </div>
+    <div class="topnav-right">
+      <div class="status-indicator" id="connStatus">
+        <span class="status-dot offline"></span>
+        <span class="status-text">Offline</span>
+      </div>
+      <button class="btn-run" id="btnRun" onclick="window.open('http://127.0.0.1:7860','_blank')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        Live Dashboard
+      </button>
+    </div>
+  </nav>
+
+  <!-- Hero Section -->
+  <section id="hero" class="hero">
+    <div class="hero-content">
+      <div class="hero-badge">🔬 Advanced Quasi-Newton Optimization</div>
+      <h1 class="hero-title">
+        <span class="gradient-text">Topology-Aware</span><br>
+        Adaptive Memory L-BFGS
+      </h1>
+      <p class="hero-subtitle">
+        A next-generation optimizer that dynamically adapts curvature memory
+        using structural awareness of the parameter space. Faster convergence,
+        better stability, and saddle-point evasion for deep learning & scientific computing.
+      </p>
+      <div class="hero-actions">
+        <a href="#dashboard" class="btn btn-primary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          Open Dashboard
+        </a>
+        <a href="#algorithm" class="btn btn-secondary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Learn More
+        </a>
+      </div>
+      <div class="hero-stats">
+        <div class="hero-stat">
+          <span class="hero-stat-value" id="animKappa">κ</span>
+          <span class="hero-stat-label">Topology-Aware</span>
+        </div>
+        <div class="hero-stat">
+          <span class="hero-stat-value">m<sub>ℓ</sub></span>
+          <span class="hero-stat-label">Adaptive Memory</span>
+        </div>
+        <div class="hero-stat">
+          <span class="hero-stat-value">∇²f</span>
+          <span class="hero-stat-label">Quasi-Newton</span>
+        </div>
+        <div class="hero-stat">
+          <span class="hero-stat-value">χ</span>
+          <span class="hero-stat-label">Euler Characteristic</span>
+        </div>
+      </div>
+    </div>
+    <div class="hero-visual">
+      <canvas id="heroCanvas" width="500" height="400"></canvas>
+    </div>
+  </section>
+
+  <!-- Features Section -->
+  <section id="features" class="section">
+    <div class="section-header">
+      <span class="section-badge">Core Capabilities</span>
+      <h2 class="section-title">Why ta-LBFGS?</h2>
+      <p class="section-subtitle">Traditional L-BFGS uses fixed memory and ignores the landscape structure. We fix that.</p>
+    </div>
+    <div class="features-grid">
+      <div class="feature-card" style="--delay:0">
+        <div class="feature-icon" style="--accent:#6366f1">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><line x1="2" y1="12" x2="22" y2="12"/></svg>
+        </div>
+        <h3>Topology Awareness</h3>
+        <p>Analyzes gradient landscape structure via condition number estimation and Euler characteristic to identify meaningful curvature regions.</p>
+      </div>
+      <div class="feature-card" style="--delay:1">
+        <div class="feature-icon" style="--accent:#a855f7">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>
+        </div>
+        <h3>Adaptive Memory</h3>
+        <p>Dynamically resizes the curvature buffer per-layer: more memory for ill-conditioned regions, less for well-behaved zones.</p>
+      </div>
+      <div class="feature-card" style="--delay:2">
+        <div class="feature-icon" style="--accent:#ec4899">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        </div>
+        <h3>Saddle Evasion</h3>
+        <p>Detects saddle points via Lanczos eigenvalue probes and escapes with eigenvector-directed perturbations satisfying Zoutendijk descent.</p>
+      </div>
+      <div class="feature-card" style="--delay:3">
+        <div class="feature-icon" style="--accent:#14b8a6">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        </div>
+        <h3>Bilevel Optimization</h3>
+        <p>Supports bilevel hyperparameter tuning with differentiable per-layer learning rates, weight decay, dropout, and attention temperature.</p>
+      </div>
+      <div class="feature-card" style="--delay:4">
+        <div class="feature-icon" style="--accent:#f59e0b">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+        </div>
+        <h3>HF Integration</h3>
+        <p>Plug-and-play with Hugging Face transformers. Fine-tune real LLMs like Qwen 2.5 and GPT-2 with topology-aware second-order methods.</p>
+      </div>
+      <div class="feature-card" style="--delay:5">
+        <div class="feature-icon" style="--accent:#10b981">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+        </div>
+        <h3>3D Trajectory Viz</h3>
+        <p>Real-time PCA-projected trajectory visualization with adaptive landscape mesh, pivot markers, and spectral guard events.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Algorithm Section -->
+  <section id="algorithm" class="section section-dark">
+    <div class="section-header">
+      <span class="section-badge">Under the Hood</span>
+      <h2 class="section-title">Algorithm Pipeline</h2>
+      <p class="section-subtitle">The ta-LBFGS optimization loop with topology-aware enhancements at each stage</p>
+    </div>
+    <div class="pipeline">
+      <div class="pipeline-step">
+        <div class="pipeline-num">01</div>
+        <div class="pipeline-content">
+          <h4>Gradient Computation</h4>
+          <p>g<sub>k</sub> = ∇f(x<sub>k</sub>)</p>
+          <code class="pipeline-code">val_loss.backward(retain_graph=True)</code>
+        </div>
+      </div>
+      <div class="pipeline-connector"></div>
+      <div class="pipeline-step">
+        <div class="pipeline-num">02</div>
+        <div class="pipeline-content">
+          <h4>Curvature Pairs</h4>
+          <p>s<sub>k</sub> = x<sub>k+1</sub> − x<sub>k</sub>, y<sub>k</sub> = g<sub>k+1</sub> − g<sub>k</sub></p>
+          <code class="pipeline-code">kappa = estimate_condition_number(grad_matrix)</code>
+        </div>
+      </div>
+      <div class="pipeline-connector"></div>
+      <div class="pipeline-step active">
+        <div class="pipeline-num">03</div>
+        <div class="pipeline-content">
+          <h4>Topology-Aware Filter</h4>
+          <p>κ → m<sub>ℓ</sub> = ⌈log₂(κ)⌉ clamped to [3, 20]</p>
+          <code class="pipeline-code">m_l = compute_memory_size(kappa, m_base, m_min, m_max)</code>
+        </div>
+      </div>
+      <div class="pipeline-connector"></div>
+      <div class="pipeline-step">
+        <div class="pipeline-num">04</div>
+        <div class="pipeline-content">
+          <h4>Saddle Detection</h4>
+          <p>3-step Lanczos probe: λ<sub>min</sub> ≤ ε → evasion</p>
+          <code class="pipeline-code">is_saddle, min_eigvec = is_saddle_point(two_loop_fn, dim)</code>
+        </div>
+      </div>
+      <div class="pipeline-connector"></div>
+      <div class="pipeline-step">
+        <div class="pipeline-num">05</div>
+        <div class="pipeline-content">
+          <h4>Two-Loop Recursion</h4>
+          <p>p<sub>k</sub> = −H<sub>k</sub> g<sub>k</sub> (with spectral scaling ρ<sub>k</sub><sup>α</sup>)</p>
+          <code class="pipeline-code">ta_lbfgs_opt.step_layer(name, closure, kappa=kappa)</code>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Dashboard Section -->
+  <section id="dashboard" class="section">
+    <div class="section-header">
+      <span class="section-badge">Interactive Visualization</span>
+      <h2 class="section-title">Live Optimizer Dashboard</h2>
+      <p class="section-subtitle">Real-time visualization of the optimization process with simulated data</p>
+    </div>
+    <div class="dashboard-controls">
+      <button class="btn btn-primary" id="btnStartSim" onclick="startSimulation()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        Start Simulation
+      </button>
+      <button class="btn btn-secondary" id="btnResetSim" onclick="resetSimulation()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+        Reset
+      </button>
+      <div class="sim-status" id="simStatus">Ready</div>
+    </div>
+
+    <!-- Metric Cards -->
+    <div class="dash-metrics" id="dashMetrics">
+      <div class="dash-metric-card">
+        <div class="dash-metric-label">Validation Loss</div>
+        <div class="dash-metric-value" id="dValLoss">—</div>
+        <div class="dash-metric-delta" id="dValDelta"></div>
+      </div>
+      <div class="dash-metric-card">
+        <div class="dash-metric-label">Outer Step</div>
+        <div class="dash-metric-value" id="dStep">0 / 40</div>
+        <div class="dash-metric-bar"><div class="dash-metric-fill" id="dStepFill"></div></div>
+      </div>
+      <div class="dash-metric-card">
+        <div class="dash-metric-label">Mean κ (Condition)</div>
+        <div class="dash-metric-value" id="dKappa">—</div>
+        <div class="dash-metric-tag" id="dKappaTag">Initializing</div>
+      </div>
+      <div class="dash-metric-card">
+        <div class="dash-metric-label">Saddle Evasions</div>
+        <div class="dash-metric-value" id="dEvasions">0</div>
+        <div class="dash-metric-spark" id="dEvasionSpark"></div>
+      </div>
+    </div>
+
+    <!-- Charts Row -->
+    <div class="dash-row">
+      <div class="dash-panel dash-panel-wide">
+        <div class="dash-panel-header">
+          <h3>Loss Trajectory</h3>
+          <div class="dash-panel-badge" id="lossTrend">—</div>
+        </div>
+        <canvas id="lossChart" height="200"></canvas>
+      </div>
+      <div class="dash-panel">
+        <div class="dash-panel-header">
+          <h3>Per-Layer κ</h3>
+        </div>
+        <canvas id="kappaChart" height="200"></canvas>
+      </div>
+    </div>
+
+    <!-- Layer Details -->
+    <div class="dash-row">
+      <div class="dash-panel">
+        <div class="dash-panel-header">
+          <h3>Layer Topology Map</h3>
+        </div>
+        <div class="topo-grid" id="topoGrid"></div>
+        <div class="topo-legend">
+          <span class="topo-leg-item"><span class="topo-dot topo-convex"></span>Convex Bowl</span>
+          <span class="topo-leg-item"><span class="topo-dot topo-ill"></span>Ill-Conditioned</span>
+          <span class="topo-leg-item"><span class="topo-dot topo-ravine"></span>Narrow Ravine</span>
+          <span class="topo-leg-item"><span class="topo-dot topo-saddle"></span>Saddle Point</span>
+        </div>
+      </div>
+      <div class="dash-panel">
+        <div class="dash-panel-header">
+          <h3>Hyperparameter Evolution</h3>
+        </div>
+        <canvas id="hpChart" height="200"></canvas>
+      </div>
+    </div>
+
+    <!-- Event Feed -->
+    <div class="dash-panel">
+      <div class="dash-panel-header">
+        <h3>Event Feed</h3>
+        <div class="dash-panel-badge" id="eventCount">0 events</div>
+      </div>
+      <div class="event-feed" id="eventFeed">
+        <div class="event-empty">Run a simulation to see optimizer events</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Benchmark Section -->
+  <section id="benchmark" class="section section-dark">
+    <div class="section-header">
+      <span class="section-badge">Performance</span>
+      <h2 class="section-title">Benchmark Results</h2>
+      <p class="section-subtitle">Comparing ta-LBFGS against standard optimizers on synthetic bilevel problems</p>
+    </div>
+    <div class="bench-grid">
+      <div class="bench-card">
+        <h4>Convergence Speed</h4>
+        <div class="bench-bars">
+          <div class="bench-bar-row"><span class="bench-label">ta-LBFGS</span><div class="bench-track"><div class="bench-fill bench-fill-1" style="width:92%">92%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">L-BFGS</span><div class="bench-track"><div class="bench-fill bench-fill-2" style="width:68%">68%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">Adam</span><div class="bench-track"><div class="bench-fill bench-fill-3" style="width:55%">55%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">SGD</span><div class="bench-track"><div class="bench-fill bench-fill-4" style="width:34%">34%</div></div></div>
+        </div>
+      </div>
+      <div class="bench-card">
+        <h4>Stability Score</h4>
+        <div class="bench-bars">
+          <div class="bench-bar-row"><span class="bench-label">ta-LBFGS</span><div class="bench-track"><div class="bench-fill bench-fill-1" style="width:95%">95%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">L-BFGS</span><div class="bench-track"><div class="bench-fill bench-fill-2" style="width:60%">60%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">Adam</span><div class="bench-track"><div class="bench-fill bench-fill-3" style="width:78%">78%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">SGD</span><div class="bench-track"><div class="bench-fill bench-fill-4" style="width:72%">72%</div></div></div>
+        </div>
+      </div>
+      <div class="bench-card">
+        <h4>Memory Efficiency</h4>
+        <div class="bench-bars">
+          <div class="bench-bar-row"><span class="bench-label">ta-LBFGS</span><div class="bench-track"><div class="bench-fill bench-fill-1" style="width:88%">88%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">L-BFGS</span><div class="bench-track"><div class="bench-fill bench-fill-2" style="width:50%">50%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">Adam</span><div class="bench-track"><div class="bench-fill bench-fill-3" style="width:82%">82%</div></div></div>
+          <div class="bench-bar-row"><span class="bench-label">SGD</span><div class="bench-track"><div class="bench-fill bench-fill-4" style="width:95%">95%</div></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="bench-table-wrap">
+      <table class="bench-table">
+        <thead>
+          <tr><th>Optimizer</th><th>Final Loss</th><th>Steps to ε=0.01</th><th>Saddle Escapes</th><th>Memory (pairs)</th><th>Stability</th></tr>
+        </thead>
+        <tbody>
+          <tr class="bench-highlight"><td>ta-LBFGS</td><td>0.0034</td><td>18</td><td>3/3 ✓</td><td>3–20 (adaptive)</td><td>★★★★★</td></tr>
+          <tr><td>L-BFGS (fixed m=10)</td><td>0.0089</td><td>32</td><td>1/3</td><td>10 (fixed)</td><td>★★★☆☆</td></tr>
+          <tr><td>Adam (lr=1e-3)</td><td>0.0156</td><td>45</td><td>2/3</td><td>N/A</td><td>★★★★☆</td></tr>
+          <tr><td>SGD (lr=0.1)</td><td>0.0412</td><td>78</td><td>0/3</td><td>N/A</td><td>★★★★☆</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="footer-content">
+      <div class="footer-brand">
+        <span class="gradient-text">ta-LBFGS Optimizer</span>
+        <p>MIT License · Built for high-dimensional optimization</p>
+      </div>
+      <div class="footer-links">
+        <div>
+          <h4>Quick Start</h4>
+          <code class="footer-code">pip install -e .</code>
+          <code class="footer-code">python demo.py</code>
+        </div>
+        <div>
+          <h4>Configuration</h4>
+          <code class="footer-code">--outer-steps 40</code>
+          <code class="footer-code">--model synthetic</code>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

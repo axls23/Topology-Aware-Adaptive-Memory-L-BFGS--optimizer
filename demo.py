@@ -736,6 +736,7 @@ def run_demo(
         if kappa_val > 10:
             return "Ill-Conditioned"
         return "Convex Bowl"
+<<<<<<< HEAD
 
     def maybe_pop_chat_prompt() -> None:
         if web_dashboard is None:
@@ -786,6 +787,210 @@ def run_demo(
 
         if len(chat_messages) > 80:
             del chat_messages[:-80]
+=======
+    def _heads_from_layer_data(layer_data, step_idx, heads_per_layer=8):
+        names = sorted(layer_data.keys())
+        kappa_grid, valid_mask, head_buffers = [], [], {}
+        for layer_idx, name in enumerate(names):
+            base_kappa = float(layer_data[name].get("kappa", 1.0))
+            secant = float(layer_data[name].get("secant", 0.0))
+            memory_size = int(layer_data[name].get("memory_size", 3))
+            row_k, row_v = [], []
+            for head_idx in range(heads_per_layer):
+                wave = 1.0 + 0.08 * np.sin((step_idx + 1) * 0.27 + head_idx * 0.9 + layer_idx * 0.3)
+                spread = 0.75 + 0.6 * (head_idx + 1) / max(heads_per_layer, 1)
+                kappa_h = max(1.0, float(base_kappa * wave * spread))
+                valid_h = bool(secant > 0.0 and np.isfinite(kappa_h))
+                row_k.append(kappa_h)
+                row_v.append(valid_h)
+                pairs = []
+                for pidx in range(max(3, min(memory_size, 12))):
+                    s_norm = 0.02 * (pidx + 1) * (1.0 + 0.2 * head_idx)
+                    y_norm = s_norm * (1.1 + 0.15 * np.cos(step_idx + pidx + head_idx))
+                    ys_val = float((s_norm * y_norm) * (1e-2 if valid_h else -5e-3))
+                    pairs.append({"idx": pidx, "s_norm": float(s_norm), "y_norm": float(y_norm), "ys": ys_val, "accepted": bool(ys_val > 0.0)})
+                head_buffers[f"{layer_idx}:{head_idx}"] = {"layer": layer_idx, "head": head_idx, "pairs": pairs}
+            kappa_grid.append(row_k)
+            valid_mask.append(row_v)
+        return kappa_grid, valid_mask, head_buffers
+
+    def _expert_rows_from_hparams(hp_dict, layer_data, n_experts=8):
+        lr_vec = hp_dict.get("lr", [])
+        if not isinstance(lr_vec, list): lr_vec = [float(lr_vec)]
+        wd_vec = hp_dict.get("wd", [])
+        if not isinstance(wd_vec, list): wd_vec = [float(wd_vec)]
+        layer_names = sorted(layer_data.keys())
+        rows = []
+        for i in range(n_experts):
+            lr_i = float(lr_vec[i % max(len(lr_vec), 1)]) if lr_vec else 1e-3
+            wd_i = float(wd_vec[i % max(len(wd_vec), 1)]) if wd_vec else 1e-2
+            name = layer_names[i % max(len(layer_names), 1)] if layer_names else None
+            kappa_i = float(layer_data.get(name, {}).get("kappa", 1.0)) if name else 1.0
+            raw = 1.4 * lr_i / max(wd_i, 1e-8)
+            load = float(max(0.0, min(1.0, 0.3 + 0.45 * np.tanh(raw) + 0.15 * np.tanh(12.0 / max(kappa_i, 1.0)))))
+            window = int(max(3, min(20, round(20.0 - 6.0 * load + 0.08 * np.log10(max(kappa_i, 1.0))))))
+            rows.append({"id": i, "load": load, "window_size": window})
+        return {"rows": rows, "active_count": sum(1 for r in rows if r["load"] > 0.25), "expired_ttl": sum(1 for r in rows if r["window_size"] <= 3)}
+
+    def _chain_payload(step, total_steps, topology_valid):
+        phase = (step + 1) / max(total_steps, 1)
+        reasoning = max(0.15, 0.52 - 0.24 * phase)
+        pivot = max(0.05, 0.09 + 0.05 * np.sin(step * 0.21))
+        answer = min(0.62, 0.24 + 0.34 * phase)
+        verify = max(0.08, 1.0 - (reasoning + pivot + answer))
+        total_tokens = 256
+        current_segment = "reasoning" if phase < 0.4 else ("answer" if phase < 0.85 else "verify")
+        return {
+            "segments": {"reasoning": float(reasoning), "pivot": float(pivot), "answer": float(answer), "verify": float(verify)},
+            "status_rows": {"current_segment": current_segment, "pivot_index": int(total_tokens * pivot),
+                            "reasoning_tokens": int(total_tokens * reasoning), "answer_tokens": int(total_tokens * answer),
+                            "verify_tokens": max(0, total_tokens - int(total_tokens * pivot) - int(total_tokens * reasoning) - int(total_tokens * answer)),
+                            "topology_valid": bool(topology_valid)},
+        }
+
+    def _build_topology_3d(iter_idx, layer_data, hp_dict):
+        """Build the topology_3d payload for 3D field visualizations."""
+        names = sorted(layer_data.keys())
+        nl = len(names)
+
+        # Field 1: Landscape Curvature Surface
+        window = min(iter_idx + 1, 50)
+        kappa_grid = []
+        status_grid = []
+        memory_sizes = []
+        evasion_evts = []
+        status_map = {"Convex Bowl": 0, "Ill-Conditioned": 1, "Narrow Ravine": 1, "Saddle Point": 2}
+        for li, name in enumerate(names):
+            kh = layer_data[name].get("kappa_history", [])[-window:]
+            kappa_grid.append([float(v) for v in kh])
+            statuses = []
+            for k in kh:
+                if layer_data[name].get("secant", 1.0) <= 0:
+                    statuses.append(2)
+                elif k > 30:
+                    statuses.append(1)
+                else:
+                    statuses.append(0)
+            status_grid.append(statuses)
+            memory_sizes.append(int(layer_data[name].get("memory_size", 5)))
+            if layer_data[name].get("landscape", "") == "Saddle Point":
+                evasion_evts.append({"layer": li, "step": iter_idx})
+
+        # Field 2: Attention Topology Volume (synthetic 8x8 masks)
+        masks_summary = {}
+        head_types_map = {}
+        heads_per_layer = 8
+        for li in range(nl):
+            base_kappa = layer_data[names[li]].get("kappa", 1.0)
+            for hi in range(min(heads_per_layer, 4)):
+                for proj in ["q", "k", "v"]:
+                    mask = []
+                    for r in range(8):
+                        row = []
+                        for c in range(8):
+                            val = 0.5 + 0.4 * np.sin(r * 0.8 + c * 0.6 + li + hi + iter_idx * 0.1)
+                            if hi == 0:
+                                val *= max(0, 1.0 - abs(r - c) * 0.3)
+                            row.append(round(float(val), 3))
+                        mask.append(row)
+                    masks_summary[f"{li}:{hi}:{proj}"] = mask
+                ht = ["local", "global", "causal", "sink"][hi % 4]
+                head_types_map[f"{li}:{hi}"] = ht
+
+        # Field 3: Expert Routing Network
+        n_experts = 8
+        expert_nodes = []
+        expert_edges = []
+        buffer_sizes = []
+        lr_vec = hp_dict.get("lr", [1e-3])
+        wd_vec = hp_dict.get("wd", [1e-2])
+        if not isinstance(lr_vec, list): lr_vec = [float(lr_vec)]
+        if not isinstance(wd_vec, list): wd_vec = [float(wd_vec)]
+        for eid in range(n_experts):
+            lr_i = float(lr_vec[eid % len(lr_vec)])
+            wd_i = float(wd_vec[eid % len(wd_vec)])
+            raw = 1.4 * lr_i / max(wd_i, 1e-8)
+            load = float(max(0.0, min(1.0, 0.3 + 0.45 * np.tanh(raw))))
+            ttl = int(max(0, 5 - int(load * 8)))
+            active = load > 0.25
+            expert_nodes.append({"id": eid, "load_freq": round(load, 3), "ttl": ttl, "active": active})
+            buf = int(max(0, min(12, round(load * 12))))
+            buffer_sizes.append(buf)
+        for i in range(n_experts):
+            for j in range(i + 1, n_experts):
+                w = max(0, 0.3 * np.cos(i * 0.7 + j * 0.5 + iter_idx * 0.15))
+                if w > 0.05:
+                    expert_edges.append({"src": i, "dst": j, "weight": round(float(w), 3)})
+
+        # Field 4: Residual Coupling Landscape
+        jac_matrix = []
+        coupled_zones = []
+        hessian_strategies = []
+        for li in range(nl):
+            row = []
+            for lj in range(nl):
+                if li == lj:
+                    row.append(1.0)
+                else:
+                    coupling = max(0, 0.8 - abs(li - lj) * 0.25 + 0.1 * np.sin(iter_idx * 0.2 + li + lj))
+                    row.append(round(float(coupling), 3))
+                    if coupling > 0.5 and li < lj:
+                        coupled_zones.append([li, lj])
+            jac_matrix.append(row)
+            hessian_strategies.append("coupled" if li < nl / 3 else "block_diag")
+
+        # Field 5: Reasoning Chain Timeline
+        chain_norms = []
+        chain_segments = []
+        chain_scales = []
+        chain_pivots = []
+        phase = (iter_idx + 1) / max(config.outer_steps, 1)
+        for t in range(min(iter_idx + 1, 20)):
+            norm_val = 0.5 + 0.3 * np.sin(t * 0.4) + 0.1 * np.cos(t * 0.7 + iter_idx * 0.1)
+            chain_norms.append(round(float(max(0.01, norm_val)), 4))
+            if t / 20.0 < 0.4:
+                chain_segments.append("reasoning")
+                chain_scales.append(0.5)
+            elif t / 20.0 < 0.85:
+                chain_segments.append("answer")
+                chain_scales.append(1.0)
+            else:
+                chain_segments.append("verify")
+                chain_scales.append(0.7)
+            if t > 0 and abs(chain_norms[-1] - (chain_norms[-2] if len(chain_norms) > 1 else 0.5)) > 0.25:
+                chain_pivots.append(t)
+
+        return {
+            "landscape_field": {
+                "kappa_grid": kappa_grid,
+                "status_grid": status_grid,
+                "evasion_events": evasion_evts,
+                "memory_sizes": memory_sizes,
+            },
+            "attention_field": {
+                "masks_summary": masks_summary,
+                "head_types": head_types_map,
+                "active_rederive": iter_idx % 100 == 0,
+            },
+            "expert_field": {
+                "nodes": expert_nodes,
+                "edges": expert_edges,
+                "buffer_sizes": buffer_sizes,
+            },
+            "residual_field": {
+                "jacobian_matrix": jac_matrix,
+                "coupled_zones": coupled_zones,
+                "hessian_strategies": hessian_strategies,
+            },
+            "chain_field": {
+                "grad_norms": chain_norms,
+                "segments": chain_segments,
+                "window_scales": chain_scales,
+                "pivot_indices": chain_pivots,
+                "topology_valid": phase > 0.3,
+            },
+        }
+>>>>>>> 02300f683e2955147ffd56012722bc4b256fc098
 
     def publish_web_state(iter_idx: int, loss_val: float, hp_dict: dict, layer_data: dict, status: str = "running"):
         if web_dashboard is None:
@@ -839,6 +1044,7 @@ def run_demo(
                     "current_prompt": active_chat.get("prompt"),
                 },
                 "events": event_feed[-60:],
+                "topology_3d": _build_topology_3d(iter_idx, layer_data, hp_dict),
             }
         )
 

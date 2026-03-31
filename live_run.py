@@ -22,12 +22,21 @@ from ta_lbfgs.dashboard.server import DashboardServer
 from ta_lbfgs.dashboard.online_rsvd import LayerwiseOnlineRSVD
 from ta_lbfgs.topology.adaptive_memory import compute_memory_size
 from ta_lbfgs.topology.condition import estimate_condition_from_grad_history
-from ta_lbfgs.dashboard.landscape_viz import generate_landscape_mesh, reset_adaptive_mesh
+from ta_lbfgs.dashboard.landscape_viz import (
+    export_topology_components_3d,
+    generate_landscape_mesh,
+    reset_adaptive_mesh,
+)
 from ta_lbfgs.training.data_preprocessing import (
     get_default_cache_path,
     get_default_dataset_path,
     load_or_build_reasoning_trace_cache,
     sample_packed_batch,
+)
+from ta_lbfgs.topology.hf_interceptor import (
+    build_topology_snapshot,
+    can_output_attentions,
+    detect_moe_model,
 )
 
 
@@ -135,6 +144,84 @@ def _chain_payload(step: int, total_steps: int, topology_valid: bool):
         },
     }
 
+
+def _topology_components_from_layer_data(
+    layer_data: Dict[str, Dict[str, Any]],
+    step_idx: int,
+    max_memory_size: int = 20,
+) -> np.ndarray:
+    """Build [n_layers, 5] topology-component curvature snapshot for one step."""
+    names = sorted(layer_data.keys())
+    out = np.zeros((len(names), 5), dtype=np.float64)
+
+    phase = (step_idx + 1) / max(1.0, float(step_idx + 2))
+    for li, name in enumerate(names):
+        d = layer_data.get(name, {})
+        kappa = float(max(1.0, d.get("kappa", 1.0)))
+        secant = float(d.get("secant", 0.0))
+        grad_norm = float(max(0.0, d.get("grad_norm", 0.0)))
+        memory_size = float(max(1, d.get("memory_size", 1)))
+
+        # 0) Attention component curvature proxy.
+        attn_curv = np.log1p(kappa)
+
+        # 1) MoE component proxy: blends load-window pressure with conditioning.
+        moe_curv = (memory_size / max(1.0, float(max_memory_size))) * np.sqrt(np.log1p(kappa))
+
+        # 2) Residual coupling proxy from secant magnitude.
+        residual_curv = np.log1p(abs(secant) * 1e3)
+
+        # 3) Chain component proxy from grad norm and progression phase.
+        chain_curv = np.log1p(grad_norm * (1.0 + 0.5 * phase))
+
+        # 4) Global conditioning summary component.
+        global_curv = 0.45 * attn_curv + 0.2 * moe_curv + 0.2 * residual_curv + 0.15 * chain_curv
+
+        out[li, :] = [attn_curv, moe_curv, residual_curv, chain_curv, global_curv]
+    return out
+
+
+def _topology_3d_payload(
+    topology_components_history: List[np.ndarray],
+    layer_names: List[str],
+    max_frames: int = 48,
+) -> Dict[str, Any]:
+    """Build compact realtime payload for 3D topology surface streaming."""
+    component_names = ["attention", "moe", "residual", "chain", "global"]
+    if not topology_components_history:
+        return {
+            "component_names": component_names,
+            "layer_names": layer_names,
+            "current_step": 0,
+            "current_surface": [],
+            "history": [],
+        }
+
+    start = max(0, len(topology_components_history) - max_frames)
+    hist = topology_components_history[start:]
+    stacked = np.stack(hist, axis=0)  # [T, L, 5]
+
+    # Normalize per component over retained window for stable visual scale.
+    norm = stacked.copy()
+    for c in range(norm.shape[2]):
+        col = norm[:, :, c]
+        lo = float(np.nanmin(col))
+        hi = float(np.nanmax(col))
+        span = max(1e-9, hi - lo)
+        norm[:, :, c] = (col - lo) / span
+
+    # Surface form matches exporter: [component, layer]
+    current_surface = norm[-1].T.tolist()
+    history = [frame.T.tolist() for frame in norm]
+
+    return {
+        "component_names": component_names,
+        "layer_names": layer_names,
+        "current_step": int(len(topology_components_history)),
+        "current_surface": current_surface,
+        "history": history,
+    }
+
 class HFGradientEvaluator:
     """Loads a local HF model and exposes true block-gradient signals."""
 
@@ -175,6 +262,10 @@ class HFGradientEvaluator:
             self.blocks = []
 
         self.n_layers = len(self.blocks)
+        self.topology_warmup_steps = 50
+        self._can_output_attentions = can_output_attentions(self.model.config)
+        self._is_moe_model = detect_moe_model(self.model.config)
+        self.last_topology_snapshot: Optional[Dict[str, Any]] = None
         ds_path = get_default_dataset_path()
         cache_path = get_default_cache_path("outputs", seq_length=max(self.max_length, 256))
         self.dataset = load_or_build_reasoning_trace_cache(
@@ -188,9 +279,26 @@ class HFGradientEvaluator:
     def _sample_batch(self) -> Dict[str, torch.Tensor]:
         return sample_packed_batch(self.dataset, batch_size=self.batch_size, device=self.device)
 
-    def compute_loss(self, hyperparams: DifferentiableHyperparameters) -> torch.Tensor:
+    def _forward_with_topology_capture(self, batch: Dict[str, torch.Tensor], step: int):
+        outputs = self.model(
+            **batch,
+            output_attentions=self._can_output_attentions and (step < int(self.topology_warmup_steps)),
+            output_router_logits=self._is_moe_model,
+            output_hidden_states=(step < int(self.topology_warmup_steps)),
+            use_cache=True,
+            return_dict=True,
+        )
+        self.last_topology_snapshot = build_topology_snapshot(
+            outputs=outputs,
+            step=int(step),
+            warmup_steps=int(self.topology_warmup_steps),
+            model_config=self.model.config,
+        )
+        return outputs
+
+    def compute_loss(self, hyperparams: DifferentiableHyperparameters, step: int) -> torch.Tensor:
         batch = self._sample_batch()
-        outputs = self.model(**batch)
+        outputs = self._forward_with_topology_capture(batch, step)
         base_loss = outputs.loss
 
         # Keep hyperparameters connected to loss for outer updates while preserving
@@ -198,6 +306,43 @@ class HFGradientEvaluator:
         lr_term = torch.stack([hyperparams.get_layer_lr(i) for i in range(self.n_layers)]).mean()
         wd_term = torch.stack([hyperparams.get_layer_wd(i) for i in range(self.n_layers)]).mean()
         return base_loss * (1.0 + 0.05 * lr_term) + 0.01 * wd_term
+
+    def compute_prompt_loss(self, prompt: str, hyperparams: DifferentiableHyperparameters, step: int) -> torch.Tensor:
+        enc = self.tokenizer(
+            [prompt],
+            return_tensors="pt",
+            truncation=True,
+            max_length=self.max_length,
+            padding=True,
+        ).to(self.device)
+        enc["labels"] = enc["input_ids"]
+        outputs = self._forward_with_topology_capture(enc, step)
+        base_loss = outputs.loss
+        lr_term = torch.stack([hyperparams.get_layer_lr(i) for i in range(self.n_layers)]).mean()
+        wd_term = torch.stack([hyperparams.get_layer_wd(i) for i in range(self.n_layers)]).mean()
+        return base_loss * (1.0 + 0.05 * lr_term) + 0.01 * wd_term
+
+    @torch.no_grad()
+    def generate_reply(self, prompt: str, max_new_tokens: int = 48) -> str:
+        enc = self.tokenizer(
+            [prompt],
+            return_tensors="pt",
+            truncation=True,
+            max_length=self.max_length,
+            padding=True,
+        ).to(self.device)
+        gen = self.model.generate(
+            **enc,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=self.tokenizer.eos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+        # Strip prompt prefix from generated ids when possible.
+        prompt_len = int(enc["input_ids"].shape[1])
+        gen_ids = gen[0, prompt_len:] if gen.shape[1] > prompt_len else gen[0]
+        text = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+        return text if text else "(no completion)"
 
     def layer_gradient_sketch(self, layer_idx: int, target_dim: int = 512) -> tuple[Optional[torch.Tensor], float]:
         if layer_idx >= self.n_layers:
@@ -278,12 +423,15 @@ def run_live(
     layer_grad_histories: Dict[str, List[torch.Tensor]] = {f"block.{i}": [] for i in range(n_layers)}
     layer_kappa_histories: Dict[str, List[float]] = {f"block.{i}": [] for i in range(n_layers)}
     prev_grad_sketch: Dict[str, torch.Tensor] = {}
+    topology_components_history: List[np.ndarray] = []
     
     def optimization_task():
         best_loss = float("inf")
         pivot_steps: List[int] = []
         spectral_guard_steps: List[int] = []
         event_feed: List[str] = []
+        chat_messages: List[Dict[str, str]] = []
+        current_chat_prompt: Optional[str] = None
         try:
             # Give Textual time to mount widgets before first update.
             if dashboard:
@@ -297,7 +445,24 @@ def run_live(
                 evaluator.model.zero_grad(set_to_none=True)
                 hyperparams.zero_grad()
 
-                val_loss = evaluator.compute_loss(hyperparams)
+                current_chat_prompt = None
+                if web_dashboard is not None:
+                    maybe_prompt = web_dashboard.pop_prompt()
+                    if maybe_prompt:
+                        current_chat_prompt = maybe_prompt.strip()
+
+                if current_chat_prompt:
+                    val_loss = evaluator.compute_prompt_loss(current_chat_prompt, hyperparams, step=outer_iter)
+                    chat_messages.append({"role": "user", "text": current_chat_prompt})
+                    try:
+                        reply = evaluator.generate_reply(current_chat_prompt, max_new_tokens=48)
+                    except Exception as exc:
+                        reply = f"(generation error: {exc})"
+                    chat_messages.append({"role": "assistant", "text": reply})
+                    event_feed.append(f"step {outer_iter + 1}: processed chat prompt ({len(current_chat_prompt)} chars)")
+                else:
+                    val_loss = evaluator.compute_loss(hyperparams, step=outer_iter)
+
                 loss_val = val_loss.item()
                 loss_history.append(loss_val)
                 
@@ -305,7 +470,14 @@ def run_live(
                     best_loss = loss_val
                 
                 val_loss.backward()
-                
+                grad_mag = sum(
+                    float(p.grad.detach().norm().item())
+                    for p in hyperparams.parameters()
+                    if p.grad is not None
+                )
+                if evaluator.last_topology_snapshot is not None:
+                    evaluator.last_topology_snapshot["grad_norm"] = grad_mag
+
                 with torch.no_grad():
                     for p in hyperparams.parameters():
                         if p.grad is not None:
@@ -397,8 +569,18 @@ def run_live(
                     spectral_guard_steps.append(outer_iter)
                     event_feed.append(f"step {outer_iter + 1}: spectral guard fired")
 
+                topology_components_history.append(
+                    _topology_components_from_layer_data(
+                        layer_data,
+                        step_idx=outer_iter,
+                        max_memory_size=config.lbfgs_memory_max,
+                    )
+                )
+
                 if len(event_feed) > 100:
                     event_feed = event_feed[-100:]
+                if len(chat_messages) > 60:
+                    chat_messages = chat_messages[-60:]
 
                 current_traj = projected_history if projected_history else [
                     [h["lr"][0], h["wd"][0], l] for h, l in zip(hp_history, loss_history)
@@ -429,6 +611,7 @@ def run_live(
                     )
 
                 if web_dashboard is not None:
+                    layer_names_sorted = sorted(layer_data.keys())
                     heat_kappa, valid_mask, head_buffers = _kappa_heads_from_layers(
                         layer_data,
                         outer_iter,
@@ -462,6 +645,15 @@ def run_live(
                                 "spectral_guard_steps": spectral_guard_steps[-64:],
                             },
                             "chain": _chain_payload(outer_iter, config.outer_steps, topology_valid_pct >= 80.0),
+                            "topology_3d": _topology_3d_payload(
+                                topology_components_history,
+                                layer_names=layer_names_sorted,
+                            ),
+                            "chat": {
+                                "messages": chat_messages,
+                                "pending_prompt_count": web_dashboard.pending_prompt_count(),
+                                "current_prompt": current_chat_prompt,
+                            },
                             "events": event_feed[-60:],
                         }
                     )
@@ -472,7 +664,24 @@ def run_live(
 
             if dashboard:
                 dashboard.call_from_thread(dashboard.update_log, "[bold green]✔ LIVE RUN COMPLETE.[/]")
+
+            if topology_components_history:
+                topo_arr = np.stack(topology_components_history, axis=0)
+                topo_out = "outputs/topology_components_3d.html"
+                export_topology_components_3d(
+                    topology_history=topo_arr,
+                    output_path=topo_out,
+                    component_names=[
+                        "attention",
+                        "moe",
+                        "residual",
+                        "chain",
+                        "global",
+                    ],
+                )
+                print(f"[live_run] 3D topology export: {topo_out}")
             if web_dashboard is not None:
+                final_layer_names = [f"block.{i}" for i in range(n_layers)]
                 web_dashboard.publish(
                     {
                         "run": {
@@ -497,6 +706,15 @@ def run_live(
                             "spectral_guard_steps": [],
                         },
                         "chain": _chain_payload(max(len(loss_history) - 1, 0), max(config.outer_steps, 1), True),
+                        "topology_3d": _topology_3d_payload(
+                            topology_components_history,
+                            layer_names=final_layer_names,
+                        ),
+                        "chat": {
+                            "messages": chat_messages,
+                            "pending_prompt_count": web_dashboard.pending_prompt_count(),
+                            "current_prompt": None,
+                        },
                         "events": ["run complete"],
                     }
                 )
@@ -506,6 +724,7 @@ def run_live(
             else:
                 print(f"[live_run] error: {e}")
             if web_dashboard is not None:
+                final_layer_names = [f"block.{i}" for i in range(n_layers)]
                 web_dashboard.publish(
                     {
                         "run": {
@@ -530,6 +749,15 @@ def run_live(
                             "spectral_guard_steps": [],
                         },
                         "chain": _chain_payload(max(len(loss_history) - 1, 0), max(config.outer_steps, 1), False),
+                        "topology_3d": _topology_3d_payload(
+                            topology_components_history,
+                            layer_names=final_layer_names,
+                        ),
+                        "chat": {
+                            "messages": chat_messages,
+                            "pending_prompt_count": web_dashboard.pending_prompt_count(),
+                            "current_prompt": None,
+                        },
                         "events": [f"run error: {e}"],
                     }
                 )

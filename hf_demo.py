@@ -19,6 +19,11 @@ from ta_lbfgs.core.hyperparameters import DifferentiableHyperparameters
 from ta_lbfgs.dashboard.textual_dashboard import TextualDashboard
 from ta_lbfgs.topology.adaptive_memory import compute_memory_size
 from ta_lbfgs.dashboard.landscape_viz import export_trajectory_3d, generate_landscape_mesh
+from ta_lbfgs.topology.hf_interceptor import (
+    build_topology_snapshot,
+    can_output_attentions,
+    detect_moe_model,
+)
 
 def get_device():
     if torch.cuda.is_available():
@@ -56,6 +61,12 @@ class HFModelWrapper:
         
         print(f"[INFO] Detected {len(self.blocks)} transformer blocks.")
 
+        self.topology_warmup_steps = 50
+        self._topology_step = 0
+        self._can_output_attentions = can_output_attentions(self.model.config)
+        self._is_moe_model = detect_moe_model(self.model.config)
+        self.last_topology_snapshot = None
+
         # Data subset
         self.train_prompts = [
             "Hyperparameter optimization is the process of choosing a set of optimal hyperparameters for a learning algorithm.",
@@ -67,7 +78,23 @@ class HFModelWrapper:
 
     def get_loss(self, prompts):
         inputs = self.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(self.device)
-        outputs = self.model(**inputs, labels=inputs["input_ids"])
+        inputs["labels"] = inputs["input_ids"]
+        step = int(self._topology_step)
+        outputs = self.model(
+            **inputs,
+            output_attentions=self._can_output_attentions and (step < int(self.topology_warmup_steps)),
+            output_router_logits=self._is_moe_model,
+            output_hidden_states=(step < int(self.topology_warmup_steps)),
+            use_cache=True,
+            return_dict=True,
+        )
+        self.last_topology_snapshot = build_topology_snapshot(
+            outputs=outputs,
+            step=step,
+            warmup_steps=int(self.topology_warmup_steps),
+            model_config=self.model.config,
+        )
+        self._topology_step += 1
         return outputs.loss
 
 def run_hf_demo(config: TaLBFGSConfig):

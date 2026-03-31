@@ -320,6 +320,73 @@
       font-size: 11px;
     }
 
+    .chat-wrap {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fbfcf7;
+      padding: 8px;
+    }
+
+    .chat-log {
+      max-height: 220px;
+      overflow-y: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      background: #ffffff;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+
+    .chat-item { margin-bottom: 6px; }
+    .chat-role {
+      font-size: 10px;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 2px;
+    }
+    .chat-user .chat-role { color: #2f5fb0; }
+    .chat-assistant .chat-role { color: #1f8b4c; }
+    .chat-text {
+      background: #f4f6ef;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px;
+      white-space: pre-wrap;
+    }
+
+    .chat-input-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+
+    .chat-input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      font: inherit;
+      background: #fff;
+      color: var(--ink);
+    }
+
+    .chat-send {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #1d8f8a;
+      color: #fff;
+      padding: 8px 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .chat-meta {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
     .event-item { margin-bottom: 6px; color: #334445; }
 
     @media (max-width: 900px) {
@@ -361,6 +428,7 @@
     <a href="#panel-experts">Expert Routing</a>
     <a href="#panel-loss">Val Loss Trajectory</a>
     <a href="#panel-chain">Chain Topology</a>
+    <a href="#panel-chat">Prompt Chat</a>
     <a href="#panel-events">Live Events</a>
   </aside>
 
@@ -409,8 +477,20 @@
       <div class="status-grid" id="chainStatus"></div>
     </section>
 
+    <section id="panel-chat" class="panel">
+      <h2>Panel 6 - Prompt Chat</h2>
+      <div class="chat-wrap">
+        <div id="chatLog" class="chat-log"></div>
+        <div class="chat-input-row">
+          <input id="chatPrompt" class="chat-input" type="text" placeholder="Enter a prompt for the live model..." />
+          <button id="chatSend" class="chat-send" type="button">Send</button>
+        </div>
+        <div id="chatMeta" class="chat-meta">queued: 0</div>
+      </div>
+    </section>
+
     <section id="panel-events" class="panel">
-      <h2>Panel 6 - Event Feed</h2>
+      <h2>Panel 7 - Event Feed</h2>
       <div id="eventFeed" class="events-list"></div>
     </section>
   </main>
@@ -603,6 +683,40 @@
       root.innerHTML = recent.map(e => `<div class="event-item">${e}</div>`).join("") || "<div class='event-item'>no events yet</div>";
     }
 
+    function renderChat(chat) {
+      const log = document.getElementById("chatLog");
+      const meta = document.getElementById("chatMeta");
+      const messages = (chat && chat.messages) || [];
+      const pending = (chat && chat.pending_prompt_count) || 0;
+      const current = (chat && chat.current_prompt) || "";
+
+      const recent = messages.slice(-20);
+      log.innerHTML = recent.map((m) => {
+        const role = (m.role || "assistant").toLowerCase();
+        const klass = role === "user" ? "chat-user" : "chat-assistant";
+        const roleLabel = role === "user" ? "You" : "Model";
+        const text = String(m.text || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        return `<div class="chat-item ${klass}"><div class="chat-role">${roleLabel}</div><div class="chat-text">${text}</div></div>`;
+      }).join("") || "<div class='chat-item'><div class='chat-text'>No chat messages yet.</div></div>";
+
+      meta.textContent = current ? `processing: ${current.slice(0, 80)}${current.length > 80 ? "..." : ""} | queued: ${pending}` : `queued: ${pending}`;
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function submitPrompt() {
+      const input = document.getElementById("chatPrompt");
+      const prompt = (input.value || "").trim();
+      if (!prompt) return;
+      input.value = "";
+      try {
+        await fetch("/chat_prompt", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({prompt})
+        });
+      } catch (_) {}
+    }
+
     function render(data) {
       state.latest = data;
       updateMetrics(data.run || {});
@@ -610,8 +724,17 @@
       renderExperts(data.experts || {});
       renderTrajectory(data.trajectory || {}, data.run || {});
       renderChain(data.chain || {});
+      renderChat(data.chat || {});
       renderEvents(data.events || []);
     }
+
+    document.getElementById("chatSend").addEventListener("click", submitPrompt);
+    document.getElementById("chatPrompt").addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        submitPrompt();
+      }
+    });
 
     const stream = new EventSource("/events");
     stream.onmessage = (ev) => {

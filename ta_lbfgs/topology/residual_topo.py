@@ -108,6 +108,18 @@ class ResidualTopologyBuilder:
             return "coupled"
         return "block_diag"
 
+    def update_from_drift(self, layer_norm_drift: List[float]) -> None:
+        """Update coupled-zone classification from layer-wise drift ratios."""
+        if not layer_norm_drift:
+            return
+        for l in range(min(self.n_layers - 1, len(layer_norm_drift))):
+            d = float(layer_norm_drift[l])
+            self.jacobian_norms[l, l + 1] = d
+            if d > self.threshold:
+                self.coupled_zone.add((l, l + 1))
+            else:
+                self.coupled_zone.discard((l, l + 1))
+
     # ------------------------------------------------------------------
     # LoRA inter-layer buffers
     # ------------------------------------------------------------------

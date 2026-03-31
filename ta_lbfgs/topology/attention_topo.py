@@ -131,6 +131,17 @@ class AttentionTopologyBuilder:
         ht = self.head_type.get((layer_idx, head_idx), "global")
         return _HESSIAN_STRATEGY.get(ht, "kfac")
 
+    def update_kappa_proxy(self, layer_idx: int, head_idx: int, key_norm: float) -> None:
+        """Fallback path when full attention weights are unavailable."""
+        norm = float(max(1e-8, key_norm))
+        if norm < 0.75:
+            htype = "local"
+        elif norm > 2.0:
+            htype = "global"
+        else:
+            htype = "causal"
+        self.head_type[(layer_idx, head_idx)] = htype
+
     # ------------------------------------------------------------------
     # Topology re-derive scheduling
     # ------------------------------------------------------------------

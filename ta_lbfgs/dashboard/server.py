@@ -36,6 +36,7 @@ class DashboardServer:
         self._clients_lock = threading.Lock()
         self._latest_state: Dict[str, Any] = self._empty_state()
         self._clients: List[_Client] = []
+        self._prompt_queue: queue.Queue = queue.Queue(maxsize=64)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -87,6 +88,17 @@ class DashboardServer:
                     "topology_valid": False,
                 },
             },
+            "topology_3d": {
+                "component_names": ["attention", "moe", "residual", "chain", "global"],
+                "layer_names": [],
+                "current_step": 0,
+                "current_surface": [],
+                "history": [],
+            },
+            "chat": {
+                "messages": [],
+                "pending_prompt_count": 0,
+            },
             "events": [],
         }
 
@@ -119,6 +131,9 @@ class DashboardServer:
                 parsed = urlparse(self.path)
                 if parsed.path == "/select_head":
                     self._select_head()
+                    return
+                if parsed.path == "/chat_prompt":
+                    self._chat_prompt()
                     return
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
 
@@ -213,6 +228,32 @@ class DashboardServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _chat_prompt(self) -> None:
+                content_len = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(content_len) if content_len > 0 else b"{}"
+                try:
+                    req = json.loads(raw.decode("utf-8"))
+                except json.JSONDecodeError:
+                    req = {}
+
+                prompt = str(req.get("prompt", "")).strip()
+                accepted = False
+                if prompt:
+                    accepted = server.submit_prompt(prompt)
+
+                body = _json_bytes(
+                    {
+                        "accepted": bool(accepted),
+                        "queued": int(server.pending_prompt_count()),
+                    }
+                )
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         self._httpd = ThreadingHTTPServer((self.host, self.port), Handler)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
@@ -245,3 +286,19 @@ class DashboardServer:
                     client.q.put_nowait(encoded)
                 except queue.Full:
                     pass
+
+    def submit_prompt(self, prompt: str) -> bool:
+        try:
+            self._prompt_queue.put_nowait(prompt)
+            return True
+        except queue.Full:
+            return False
+
+    def pop_prompt(self) -> Optional[str]:
+        try:
+            return self._prompt_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def pending_prompt_count(self) -> int:
+        return int(self._prompt_queue.qsize())

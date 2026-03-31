@@ -464,11 +464,11 @@ def export_trajectory_3d(
     mesh_instance: Optional[AdaptiveLandscapeMesh] = None,
 ):
     """
-    Export an interactive 3D visualization with adaptive mesh.
-
-    If mesh_instance is provided, uses the evolved adaptive mesh.
-    If mesh_data is provided (legacy), uses the static tuple.
+    Deprecated: trajectory export has been disabled in favor of topology-component exports.
     """
+    # Intentionally disabled to enforce topology-only 3D visualization outputs.
+    return
+
     hyperparameter_history = np.asarray(hyperparameter_history, dtype=np.float64)
     loss_history = np.asarray(loss_history, dtype=np.float64).reshape(-1)
     if hyperparameter_history.ndim != 2 or loss_history.size == 0:
@@ -675,6 +675,149 @@ def export_trajectory_3d(
                 bgcolor="rgba(20, 20, 30, 0.85)",
                 font=dict(size=11, color="white"),
             )
+        ],
+    )
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    fig.write_html(output_path)
+
+
+def export_topology_components_3d(
+    topology_history: np.ndarray,
+    output_path: str,
+    component_names: Optional[List[str]] = None,
+):
+    """
+    Export an animated 3D view of five topology components over layers.
+
+    Args:
+        topology_history: Array with shape [T, L, C] where
+            T = steps, L = layers, C = components (expected 5).
+        output_path: HTML path for the interactive Plotly export.
+        component_names: Optional names for component axis labels.
+    """
+    data = np.asarray(topology_history, dtype=np.float64)
+    if data.ndim != 3 or data.shape[0] == 0 or data.shape[1] == 0 or data.shape[2] == 0:
+        return
+
+    T, L, C = data.shape
+    if component_names is None or len(component_names) != C:
+        component_names = [f"comp_{i}" for i in range(C)]
+
+    # Robust per-component normalization keeps scales comparable in one scene.
+    norm = data.copy()
+    for c in range(C):
+        col = norm[:, :, c]
+        lo = float(np.nanmin(col))
+        hi = float(np.nanmax(col))
+        span = max(1e-9, hi - lo)
+        norm[:, :, c] = (col - lo) / span
+
+    x = np.arange(L, dtype=np.float64)
+    y = np.arange(C, dtype=np.float64)
+    X, Y = np.meshgrid(x, y)
+
+    z0 = norm[0].T
+    fig = go.Figure()
+    fig.add_trace(
+        go.Surface(
+            x=X,
+            y=Y,
+            z=z0,
+            surfacecolor=z0,
+            colorscale="Viridis",
+            cmin=0.0,
+            cmax=1.0,
+            opacity=0.95,
+            showscale=True,
+            colorbar=dict(title="Normalized Curvature"),
+            hovertemplate=(
+                "Layer: %{x}<br>"
+                "Component idx: %{y}<br>"
+                "Curvature: %{z:.3f}<extra></extra>"
+            ),
+            name="Topology Curvature",
+        )
+    )
+
+    frames = []
+    for t in range(T):
+        zt = norm[t].T
+        frames.append(
+            go.Frame(
+                data=[
+                    go.Surface(
+                        x=X,
+                        y=Y,
+                        z=zt,
+                        surfacecolor=zt,
+                        colorscale="Viridis",
+                        cmin=0.0,
+                        cmax=1.0,
+                        opacity=0.95,
+                        showscale=True,
+                    )
+                ],
+                name=f"step_{t}",
+            )
+        )
+    fig.frames = frames
+
+    steps = [
+        {
+            "label": str(t),
+            "method": "animate",
+            "args": [[f"step_{t}"], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}, "transition": {"duration": 0}}],
+        }
+        for t in range(T)
+    ]
+
+    fig.update_layout(
+        template="plotly_dark",
+        title="Evolving Topology Curvature (5 Components)",
+        scene=dict(
+            xaxis_title="Layer Index",
+            yaxis_title="Topology Component",
+            zaxis_title="Normalized Curvature",
+            yaxis=dict(
+                tickmode="array",
+                tickvals=list(range(C)),
+                ticktext=component_names,
+            ),
+            camera=dict(eye=dict(x=1.7, y=1.4, z=1.0)),
+        ),
+        margin=dict(l=0, r=0, t=48, b=0),
+        updatemenus=[
+            {
+                "type": "buttons",
+                "showactive": False,
+                "x": 0.02,
+                "y": 1.02,
+                "xanchor": "left",
+                "yanchor": "top",
+                "buttons": [
+                    {
+                        "label": "Play",
+                        "method": "animate",
+                        "args": [None, {"frame": {"duration": 250, "redraw": True}, "transition": {"duration": 0}}],
+                    },
+                    {
+                        "label": "Pause",
+                        "method": "animate",
+                        "args": [[None], {"mode": "immediate", "frame": {"duration": 0, "redraw": False}, "transition": {"duration": 0}}],
+                    },
+                ],
+            }
+        ],
+        sliders=[
+            {
+                "active": 0,
+                "y": 1.0,
+                "x": 0.22,
+                "len": 0.75,
+                "currentvalue": {"prefix": "Step: "},
+                "steps": steps,
+            }
         ],
     )
 

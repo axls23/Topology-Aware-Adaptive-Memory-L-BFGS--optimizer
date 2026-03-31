@@ -16,7 +16,7 @@ verification mode.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 _SEGMENTS = ("reasoning", "answer", "verify")
@@ -52,18 +52,23 @@ class ChainTopologyController:
     # Per-step update
     # ------------------------------------------------------------------
     def on_outer_step(
-        self, grad_norm: float, prm_score: Optional[float] = None
+        self,
+        grad_norm: float,
+        prm_score: Optional[float] = None,
+        mean_entropy: Optional[float] = None,
     ) -> None:
         """
         Process one outer optimisation step.
 
         Checks whether the current grad_norm constitutes a pivot event
         relative to the rolling history, then appends it to the history.
-        Optionally updates segment and topology validity from a PRM score.
+        Optionally updates segment and topology validity from PRM score
+        and entropy-derived reasoning state.
 
         Args:
             grad_norm: Gradient norm at the current outer step.
             prm_score: Optional process-reward-model score in [0, 1].
+            mean_entropy: Optional mean token entropy for chain segmentation.
         """
         history = self._grad_norm_history
 
@@ -80,14 +85,33 @@ class ChainTopologyController:
         if len(history) > 20:
             history.pop(0)
 
+        if mean_entropy is not None:
+            if mean_entropy > 2.5:
+                self.current_segment = "reasoning"
+            elif mean_entropy < 1.0:
+                self.current_segment = "answer"
+            else:
+                self.current_segment = "verify"
+
         # PRM score gating
         if prm_score is not None:
             if prm_score >= 0.3:
                 self.topology_valid = True
-                self.current_segment = "answer"
+                if mean_entropy is None:
+                    self.current_segment = "answer"
             else:
                 # Low quality: stay in reasoning, do not mark valid
                 self.current_segment = "reasoning"
+
+    def on_outer_step_with_snapshot(self, snap: Dict[str, Any], grad_norm: float) -> None:
+        entropy = snap.get("logit_entropy")
+        mean_entropy: Optional[float] = None
+        if entropy is not None:
+            try:
+                mean_entropy = float(entropy.detach().mean().item())
+            except Exception:
+                mean_entropy = None
+        self.on_outer_step(grad_norm=grad_norm, prm_score=None, mean_entropy=mean_entropy)
 
     # ------------------------------------------------------------------
     # Pivot handling

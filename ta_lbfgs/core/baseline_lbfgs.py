@@ -478,11 +478,10 @@ class FullBatchLBFGS(Optimizer):
         return out
 
     def _numel(self):
-        if self._numel_cache is None:
-            self._numel_cache = reduce(
-                lambda total, p: total + p.numel(), self._params, 0
-            )
-        return self._numel_cache
+        current = reduce(lambda total, p: total + p.numel(), self._params, 0)
+        # Keep cache aligned even if params are appended after optimizer init.
+        self._numel_cache = current
+        return current
 
     def _gather_flat_grad(self):
         """Flatten and concatenate all parameter gradients."""
@@ -499,12 +498,19 @@ class FullBatchLBFGS(Optimizer):
 
     def _add_update(self, step_size, update):
         """Apply update to parameters."""
+        expected_numel = self._numel()
+        if update.numel() != expected_numel:
+            raise RuntimeError(
+                f"Update vector length mismatch: got {update.numel()}, expected {expected_numel}. "
+                "Parameter list may have changed without refreshing optimizer state."
+            )
+
         offset = 0
         for p in self._params:
             numel = p.numel()
             p.data.add_(update[offset : offset + numel].view_as(p.data), alpha=step_size)
             offset += numel
-        assert offset == self._numel()
+        assert offset == expected_numel
 
     def _copy_params(self):
         """Deep copy current parameters."""

@@ -11,12 +11,16 @@ Wraps the baseline FullBatchLBFGS to provide:
 import torch
 import torch.nn as nn
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Callable, Any, Tuple
 from collections import defaultdict
 from torch import Tensor
 
 from .baseline_lbfgs import FullBatchLBFGS, is_legal
 from ..config import TaLBFGSConfig
+from ..topology.attention_topo import AttentionTopologyBuilder
+from ..topology.chain_topo import ChainTopologyController
+from ..topology.moe_topo import MoETopologyBuilder
+from ..topology.residual_topo import ResidualTopologyBuilder
 from ..utils.kfac import KFACEmbedding
 
 
@@ -86,6 +90,8 @@ class LayerState:
     warmup_seen_steps: int = 0
     warmup_refresh_remaining: int = 0
     topology_edges: int = 0
+    topology_segment: str = "reasoning"
+    topology_hessian_strategy: str = "block_diag"
 
 
 class LayerwiseTaLBFGS:
@@ -114,6 +120,33 @@ class LayerwiseTaLBFGS:
         self._topology_state: Dict[str, Dict[str, Any]] = {}
         self._layer_group_type: Dict[str, str] = {}
         self._kfac_embed: Dict[str, KFACEmbedding] = {}
+        self._layer_index: Dict[str, int] = {}
+        self._moe_topology: Dict[str, MoETopologyBuilder] = {}
+        self.attention_topology = AttentionTopologyBuilder(
+            model=model,
+            window_size=max(1, int(getattr(config, "gradient_window_size", 10))),
+            warmup_steps=max(1, int(getattr(config, "auto_topology_warmup_steps", 50))),
+        )
+        self.chain_topology = ChainTopologyController(
+            pivot_sigma=float(getattr(config, "diagnostics_spike_threshold", 3.0))
+        )
+        self.residual_topology = ResidualTopologyBuilder(
+            n_layers=max(1, int(getattr(config, "n_layers", 1))),
+            threshold=float(getattr(config, "distance_threshold", 0.05)),
+        )
+        self._pending_topology_snapshot: Optional[Dict[str, Any]] = None
+        self._last_grad_norm: float = 0.0
+
+    @staticmethod
+    def _infer_layer_index(name: str) -> int:
+        parts = name.split(".")
+        for i, part in enumerate(parts[:-1]):
+            if part in {"layers", "h", "blocks"} and parts[i + 1].isdigit():
+                return int(parts[i + 1])
+        for part in parts:
+            if part.isdigit():
+                return int(part)
+        return 0
 
     def register_layer(self, name: str, params: List[nn.Parameter]):
         """
@@ -128,6 +161,7 @@ class LayerwiseTaLBFGS:
         """
         group_type = classify_param_group(name, params[0].data if params else torch.empty(0), self.model)
         self._layer_group_type[name] = group_type
+        self._layer_index[name] = self._infer_layer_index(name)
         history_size = self.config.lbfgs_memory_max if group_type == "embedding" else self.config.lbfgs_memory_base
 
         optimizer = FullBatchLBFGS(
@@ -210,6 +244,12 @@ class LayerwiseTaLBFGS:
         state.secant_value = 0.0
         state.secant_history.append(0.0)
         state.landscape_status = "Embedding-KFAC"
+        topo_meta = self._update_axis_topologies(
+            layer_name=layer_name,
+            opt=opt,
+            state=state,
+            loss_value=loss.item() if isinstance(loss, torch.Tensor) else None,
+        )
 
         result = {
             "layer": layer_name,
@@ -220,6 +260,7 @@ class LayerwiseTaLBFGS:
             "secant": 0.0,
             "landscape": state.landscape_status,
             "evasion": False,
+            "topology": topo_meta,
         }
         for cb in self._callbacks:
             cb(result)
@@ -228,6 +269,170 @@ class LayerwiseTaLBFGS:
     def register_callback(self, callback: Callable):
         """Register a callback invoked after each layer step (for dashboard)."""
         self._callbacks.append(callback)
+
+    def ingest_topology_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """Queue the latest HF-derived topology snapshot for next layer update."""
+        self._pending_topology_snapshot = snapshot
+
+    def _update_topology_from_snapshot(self, snap: Dict[str, Any], default_grad_norm: float) -> None:
+        """Single topology entry point fed by one intercepted model output."""
+        attn_weights = snap.get("attn_weights")
+        if attn_weights is not None:
+            for layer_idx, layer_attn in enumerate(attn_weights):
+                if layer_attn is None:
+                    continue
+                attn = layer_attn.detach()
+                if attn.dim() == 4:
+                    mean_attn = attn.mean(dim=0)
+                elif attn.dim() == 3:
+                    mean_attn = attn
+                else:
+                    continue
+
+                for head_idx in range(int(mean_attn.shape[0])):
+                    head_mat = mean_attn[head_idx]
+                    self.attention_topology.classify_head(layer_idx, head_idx, head_mat)
+                    col = head_mat.sum(dim=0)
+                    std = head_mat.std(dim=0)
+                    self.attention_topology.accumulate_secant(layer_idx, head_idx, "attn", col, std)
+        else:
+            kv_key_norms = snap.get("kv_key_norms")
+            if kv_key_norms is not None:
+                for layer_idx, head_norms in enumerate(kv_key_norms):
+                    for head_idx, norm in enumerate(head_norms):
+                        self.attention_topology.update_kappa_proxy(layer_idx, head_idx, float(norm))
+
+        layer_name_by_idx = {idx: name for name, idx in self._layer_index.items()}
+        expert_topk_indices = snap.get("expert_topk_indices")
+        if expert_topk_indices is not None:
+            for layer_idx, idx_tensor in enumerate(expert_topk_indices):
+                layer_name = layer_name_by_idx.get(layer_idx)
+                if layer_name is None:
+                    continue
+                if layer_name not in self._moe_topology:
+                    self._moe_topology[layer_name] = MoETopologyBuilder(
+                        n_experts=max(1, int(getattr(self.config, "n_experts", 8))),
+                        top_k=max(1, int(getattr(self.config, "moe_top_k", 2))),
+                        m_max=int(self.config.lbfgs_memory_max),
+                        ttl_expire=max(1, int(getattr(self.config, "edrt_refresh_interval", 50))),
+                    )
+                moe = self._moe_topology[layer_name]
+                active = idx_tensor.detach().reshape(-1).unique().tolist()
+                active = [int(v) for v in active if 0 <= int(v) < moe.n_experts]
+                moe.on_forward(active)
+                moe.expire_stale()
+
+        drift = snap.get("layer_norm_drift")
+        if drift is not None:
+            self.residual_topology.update_from_drift([float(v) for v in drift])
+
+        grad_norm = snap.get("grad_norm")
+        if grad_norm is None:
+            grad_norm = default_grad_norm if default_grad_norm > 0 else self._last_grad_norm
+        grad_norm = float(grad_norm)
+        self._last_grad_norm = grad_norm
+        self.chain_topology.on_outer_step_with_snapshot(snap, grad_norm)
+
+    def _latest_secant_pair(self, opt: FullBatchLBFGS) -> Optional[Tuple[Tensor, Tensor]]:
+        state = opt.state.get("global_state", {})
+        old_stps = state.get("old_stps", [])
+        old_dirs = state.get("old_dirs", [])
+        if not old_stps or not old_dirs:
+            return None
+        s = old_stps[-1].detach().reshape(-1)
+        y = old_dirs[-1].detach().reshape(-1)
+        if s.numel() == 0 or y.numel() == 0 or s.numel() != y.numel():
+            return None
+        return s, y
+
+    def _extract_active_experts(self, layer_name: str) -> List[int]:
+        if self.model is None:
+            return []
+
+        layer_idx = self._layer_index.get(layer_name, 0)
+        candidates = [
+            getattr(self.model, "active_experts", None),
+            getattr(self.model, "last_active_experts", None),
+            getattr(self.model, "moe_active_experts", None),
+        ]
+        for cand in candidates:
+            if cand is None:
+                continue
+            if isinstance(cand, dict):
+                vals = cand.get(layer_name, cand.get(layer_idx, []))
+            else:
+                vals = cand
+            if isinstance(vals, (list, tuple)):
+                return [int(v) for v in vals if isinstance(v, (int, float))]
+        return []
+
+    def _apply_chain_memory_scale(self, state: LayerState, opt: FullBatchLBFGS) -> None:
+        scale = float(self.chain_topology.window_scale())
+        if scale <= 0:
+            return
+        new_m = int(round(state.memory_size * scale))
+        new_m = max(int(self.config.lbfgs_memory_min), min(int(self.config.lbfgs_memory_max), new_m))
+        if new_m != state.memory_size:
+            opt.resize_history(new_m)
+            state.memory_size = new_m
+
+    def _update_axis_topologies(
+        self,
+        layer_name: str,
+        opt: FullBatchLBFGS,
+        state: LayerState,
+        loss_value: Optional[float],
+    ) -> Dict[str, Any]:
+        layer_idx = self._layer_index.get(layer_name, 0)
+        secant_pair = self._latest_secant_pair(opt)
+
+        if self._pending_topology_snapshot is not None:
+            self._update_topology_from_snapshot(self._pending_topology_snapshot, float(state.grad_norm))
+            self._pending_topology_snapshot = None
+
+        if secant_pair is not None:
+            s, y = secant_pair
+            self.attention_topology.accumulate_secant(layer_idx, 0, "q", s, y)
+            if self.attention_topology.should_rederive(val_loss=loss_value):
+                mask = self.attention_topology.derive_mask(layer_idx, 0, "q")
+                if mask is not None:
+                    density = float(mask.float().mean().item())
+                    self.attention_topology.head_type[(layer_idx, 0)] = "local" if density < 0.2 else "global"
+
+        attention_strategy = self.attention_topology.hessian_strategy(layer_idx, 0)
+
+        self._last_grad_norm = float(state.grad_norm)
+        self.chain_topology.on_outer_step(float(state.grad_norm), prm_score=None)
+        state.topology_segment = self.chain_topology.current_segment
+        self._apply_chain_memory_scale(state, opt)
+
+        residual_strategy = self.residual_topology.hessian_strategy(layer_idx)
+        state.topology_hessian_strategy = residual_strategy
+
+        active_experts = self._extract_active_experts(layer_name)
+        if active_experts or "moe" in layer_name.lower() or "expert" in layer_name.lower():
+            if layer_name not in self._moe_topology:
+                self._moe_topology[layer_name] = MoETopologyBuilder(
+                    n_experts=max(1, int(getattr(self.config, "n_experts", 8))),
+                    top_k=max(1, int(getattr(self.config, "moe_top_k", 2))),
+                    m_max=int(self.config.lbfgs_memory_max),
+                    ttl_expire=max(1, int(getattr(self.config, "edrt_refresh_interval", 50))),
+                )
+            moe = self._moe_topology[layer_name]
+            moe.on_forward(active_experts)
+            if secant_pair is not None:
+                s, y = secant_pair
+                for e in active_experts:
+                    if 0 <= int(e) < moe.n_experts:
+                        moe.add_pair(int(e), s, y)
+            moe.expire_stale()
+
+        return {
+            "attention_strategy": attention_strategy,
+            "chain_segment": self.chain_topology.current_segment,
+            "residual_strategy": residual_strategy,
+            "moe_active_experts": active_experts,
+        }
 
     def _init_sparse_sketch(self, layer_name: str, device: torch.device):
         topo = self._topology_state[layer_name]
@@ -450,6 +655,12 @@ class LayerwiseTaLBFGS:
                 "evasion": False,
                 "topology_edges": state.topology_edges,
             }
+            result["topology"] = self._update_axis_topologies(
+                layer_name=layer_name,
+                opt=opt,
+                state=state,
+                loss_value=loss.item() if isinstance(loss, torch.Tensor) else None,
+            )
             for cb in self._callbacks:
                 cb(result)
 
@@ -519,6 +730,12 @@ class LayerwiseTaLBFGS:
             "landscape": state.landscape_status,
             "evasion": evasion_triggered,
         }
+        result["topology"] = self._update_axis_topologies(
+            layer_name=layer_name,
+            opt=opt,
+            state=state,
+            loss_value=loss.item() if isinstance(loss, torch.Tensor) else None,
+        )
         for cb in self._callbacks:
             cb(result)
 
@@ -545,6 +762,17 @@ class LayerwiseTaLBFGS:
             closure = closures.get(name)
             if closure is not None:
                 results[name] = self.step_layer(name, closure, kappa)
+
+        if results:
+            layer_outputs = [
+                torch.tensor([float(self.layer_states[name].grad_norm)], dtype=torch.float32)
+                for name in results
+            ]
+            self.residual_topology.probe_jacobian_norms(
+                model=self.model,
+                x_sample=None,
+                layer_outputs=layer_outputs,
+            )
         return results
 
     def _classify_landscape(self, state: LayerState) -> str:
@@ -603,6 +831,8 @@ class LayerwiseTaLBFGS:
                 "evasion_count": state.evasion_count,
                 "iteration": state.iteration,
                 "topology_edges": state.topology_edges,
+                "topology_segment": state.topology_segment,
+                "topology_hessian_strategy": state.topology_hessian_strategy,
             }
         return data
 

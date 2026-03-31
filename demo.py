@@ -1,21 +1,22 @@
-﻿"""
-ta-LBFGS Demo: Synthetic Bilevel Optimization with Live CLI Dashboard.
+"""
+ta-LBFGS Demo: Bilevel Optimization with Live CLI Dashboard.
 
 Demonstrates the full ta-LBFGS pipeline:
 - Multi-layer synthetic optimization problem
 - Differentiable hyperparameters (lr, wd) in log-space
 - Live Rich CLI dashboard with per-layer topology metrics
 - Saddle-point evasion via secant condition monitoring
-- 3D trajectory export on completion
+- Topology component 3D export on completion
 
 Usage:
     python demo.py
-    python demo.py --outer-steps 30 --inner-steps 5 --no-dashboard
+    python demo.py --inner-steps 5 --no-dashboard
 """
 
 import argparse
 from collections import OrderedDict
 from contextlib import nullcontext
+from typing import Dict, List, Any, Optional
 import os
 import time
 import torch
@@ -35,7 +36,6 @@ from ta_lbfgs.core.lbfgs import LayerwiseTaLBFGS
 from ta_lbfgs.dashboard.textual_dashboard import TextualDashboard
 from ta_lbfgs.dashboard.server import DashboardServer
 from ta_lbfgs.dashboard.landscape_viz import (
-    export_trajectory_3d,
     plot_dynamics,
     plot_hyperparameter_trajectories,
     generate_landscape_mesh,
@@ -62,11 +62,241 @@ from ta_lbfgs.training.data_preprocessing import (
     load_or_build_reasoning_trace_cache,
     sample_packed_batch,
 )
+from ta_lbfgs.topology.hf_interceptor import (
+    build_topology_snapshot,
+    can_output_attentions,
+    detect_moe_model,
+)
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+def _topology_components_from_layer_data(
+    layer_data: Dict[str, Dict[str, Any]],
+    step_idx: int,
+    max_memory_size: int = 20,
+) -> np.ndarray:
+    """Build [n_layers, 5] topology-component curvature snapshot for one step."""
+    names = sorted(layer_data.keys())
+    out = np.zeros((len(names), 5), dtype=np.float64)
+
+    phase = (step_idx + 1) / max(1.0, float(step_idx + 2))
+    for li, name in enumerate(names):
+        d = layer_data.get(name, {})
+        kappa = float(max(1.0, d.get("kappa", 1.0)))
+        secant = float(d.get("secant", 0.0))
+        grad_norm = float(max(0.0, d.get("grad_norm", 0.0)))
+        memory_size = float(max(1, d.get("memory_size", 1)))
+
+        # 0) Attention component curvature proxy.
+        attn_curv = np.log1p(kappa)
+        # 1) MoE component proxy: blends load-window pressure with conditioning.
+        moe_curv = (memory_size / max(1.0, float(max_memory_size))) * np.sqrt(np.log1p(kappa))
+        # 2) Residual coupling proxy from secant magnitude.
+        residual_curv = np.log1p(abs(secant) * 1e3)
+        # 3) Chain component proxy from grad norm and progression phase.
+        chain_curv = np.log1p(grad_norm * (1.0 + 0.5 * phase))
+        # 4) Global conditioning summary component.
+        global_curv = 0.45 * attn_curv + 0.2 * moe_curv + 0.2 * residual_curv + 0.15 * chain_curv
+
+        out[li, :] = [attn_curv, moe_curv, residual_curv, chain_curv, global_curv]
+    return out
+
+
+def _build_topology_3d_html(
+    topology_components_history: List[np.ndarray],
+    layer_names: List[str],
+    output_path: str,
+):
+    """Export topology components as interactive 3D surface HTML using Plotly."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        print("[WARNING] Plotly not available; skipping topology 3D export")
+        return
+
+    component_names = ["attention", "moe", "residual", "chain", "global"]
+    if not topology_components_history:
+        return
+
+    stacked = np.stack(topology_components_history, axis=0)  # [T, L, 5]
+
+    # Normalize per component for stable visual scale
+    norm = stacked.copy()
+    for c in range(norm.shape[2]):
+        col = norm[:, :, c]
+        lo = float(np.nanmin(col))
+        hi = float(np.nanmax(col))
+        span = max(1e-9, hi - lo)
+        norm[:, :, c] = (col - lo) / span
+
+    # Build 3D surface for each component
+    fig = go.Figure()
+
+    T, L, C = norm.shape
+    x_steps = np.arange(T)
+    y_layers = np.arange(L)
+    
+    for comp_idx, comp_name in enumerate(component_names):
+        z_data = norm[:, :, comp_idx].T  # [L, T]
+        
+        fig.add_trace(go.Surface(
+            x=x_steps,
+            y=y_layers,
+            z=z_data,
+            name=comp_name,
+            colorscale="Viridis",
+            showscale=(comp_idx == 0),
+            visible=(comp_idx == 0),
+        ))
+
+    # Buttons for switching between components
+    buttons = []
+    for i, comp_name in enumerate(component_names):
+        visible = [False] * len(component_names)
+        visible[i] = True
+        buttons.append(
+            dict(
+                label=comp_name.capitalize(),
+                method="update",
+                args=[{"visible": visible}, {"title": f"Topology Component: {comp_name.upper()}"}]
+            )
+        )
+
+    fig.update_layout(
+        updatemenus=[
+            dict(
+                type="buttons",
+                direction="left",
+                buttons=buttons,
+                x=0.1, y=1.15,
+                xanchor="left", yanchor="top",
+            )
+        ],
+        title="Topology Component: ATTENTION",
+        scene=dict(
+            xaxis_title="Optimization Step",
+            yaxis_title="Layer",
+            zaxis_title="Curvature Proxy (Normalized)",
+            camera=dict(
+                eye=dict(x=1.2, y=1.2, z=1.3),
+            ),
+        ),
+        width=1200,
+        height=800,
+    )
+
+    fig.write_html(output_path)
+    print(f"  Topology Components 3D exported to: {output_path}")
+
+
+def _heads_from_layer_data(layer_data: dict, step_idx: int, heads_per_layer: int = 8):
+    names = sorted(layer_data.keys())
+    kappa_grid = []
+    valid_mask = []
+    head_buffers = {}
+
+    for layer_idx, name in enumerate(names):
+        base_kappa = float(layer_data[name].get("kappa", 1.0))
+        secant = float(layer_data[name].get("secant", 0.0))
+        memory_size = int(layer_data[name].get("memory_size", 3))
+
+        row_kappa = []
+        row_valid = []
+        for head_idx in range(heads_per_layer):
+            wave = 1.0 + 0.08 * np.sin((step_idx + 1) * 0.21 + head_idx * 0.63 + layer_idx * 0.2)
+            spread = 0.75 + 0.6 * (head_idx + 1) / max(heads_per_layer, 1)
+            kappa_h = max(1.0, float(base_kappa * wave * spread))
+            valid_h = bool(secant > 0.0 and np.isfinite(kappa_h))
+            row_kappa.append(kappa_h)
+            row_valid.append(valid_h)
+
+            pair_count = max(3, min(memory_size, 12))
+            pairs = []
+            for pidx in range(pair_count):
+                s_norm = 0.02 * (pidx + 1) * (1.0 + 0.15 * head_idx)
+                y_norm = s_norm * (1.08 + 0.13 * np.cos(step_idx + pidx + head_idx))
+                ys_val = float((s_norm * y_norm) * (1e-2 if valid_h else -4e-3))
+                pairs.append(
+                    {
+                        "idx": pidx,
+                        "s_norm": float(s_norm),
+                        "y_norm": float(y_norm),
+                        "ys": ys_val,
+                        "accepted": bool(ys_val > 0.0),
+                    }
+                )
+
+            head_buffers[f"{layer_idx}:{head_idx}"] = {
+                "layer": layer_idx,
+                "head": head_idx,
+                "pairs": pairs,
+            }
+
+        kappa_grid.append(row_kappa)
+        valid_mask.append(row_valid)
+
+    return kappa_grid, valid_mask, head_buffers
+
+
+def _expert_rows_from_hparams(hp_dict: dict, layer_data: dict, n_experts: int = 8):
+    lr_vec = hp_dict.get("lr", [])
+    if not isinstance(lr_vec, list):
+        lr_vec = [float(lr_vec)]
+    wd_vec = hp_dict.get("wd", [])
+    if not isinstance(wd_vec, list):
+        wd_vec = [float(wd_vec)]
+
+    layer_names = sorted(layer_data.keys())
+    rows = []
+    for i in range(n_experts):
+        lr_i = float(lr_vec[i % max(len(lr_vec), 1)]) if lr_vec else 1e-3
+        wd_i = float(wd_vec[i % max(len(wd_vec), 1)]) if wd_vec else 1e-2
+        name = layer_names[i % max(len(layer_names), 1)] if layer_names else None
+        kappa_i = float(layer_data.get(name, {}).get("kappa", 1.0)) if name else 1.0
+        raw = 1.4 * lr_i / max(wd_i, 1e-8)
+        load = float(max(0.0, min(1.0, 0.3 + 0.45 * np.tanh(raw) + 0.15 * np.tanh(12.0 / max(kappa_i, 1.0)))))
+        window = int(max(3, min(20, round(20.0 - 6.0 * load + 0.08 * np.log10(max(kappa_i, 1.0))))))
+        rows.append({"id": i, "load": load, "window_size": window})
+
+    active_count = sum(1 for r in rows if r["load"] > 0.25)
+    expired_ttl = sum(1 for r in rows if r["window_size"] <= 3)
+    return {"rows": rows, "active_count": active_count, "expired_ttl": expired_ttl}
+
+
+def _chain_payload(step: int, total_steps: int, topology_valid: bool):
+    phase = (step + 1) / max(total_steps, 1)
+    reasoning = max(0.15, 0.5 - 0.22 * phase)
+    pivot = max(0.05, 0.09 + 0.05 * np.sin(step * 0.2))
+    answer = min(0.62, 0.26 + 0.32 * phase)
+    verify = max(0.08, 1.0 - (reasoning + pivot + answer))
+
+    total_tokens = 256
+    pivot_tokens = int(total_tokens * pivot)
+    reasoning_tokens = int(total_tokens * reasoning)
+    answer_tokens = int(total_tokens * answer)
+    verify_tokens = max(0, total_tokens - (pivot_tokens + reasoning_tokens + answer_tokens))
+
+    current_segment = "reasoning" if phase < 0.4 else ("answer" if phase < 0.85 else "verify")
+    return {
+        "segments": {
+            "reasoning": float(reasoning),
+            "pivot": float(pivot),
+            "answer": float(answer),
+            "verify": float(verify),
+        },
+        "status_rows": {
+            "current_segment": current_segment,
+            "pivot_index": pivot_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "answer_tokens": answer_tokens,
+            "verify_tokens": verify_tokens,
+            "topology_valid": bool(topology_valid),
+        },
+    }
+
+
+# ────────────────────────────────────────────────────────────────────
 # Synthetic Multi-Layer Problem
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ────────────────────────────────────────────────────────────────────
 
 class SyntheticLayer(nn.Module):
     """
@@ -166,38 +396,26 @@ class HFModelWrapper(nn.Module):
         super().__init__()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.low_vram = low_vram
-        self.model_name = model_name
 
         if torch.cuda.is_available():
             torch.backends.cuda.enable_flash_sdp(False)
             torch.backends.cuda.enable_mem_efficient_sdp(False)
             torch.backends.cuda.enable_math_sdp(True)
         
-        # Resolve path - use local if Qwen, otherwise use HUB for models like gpt2
-        if "Qwen" in model_name:
-            cache_base = os.path.expanduser("~/.cache/huggingface/hub")
-            snapshot_id = "060db6499f32faf8b98477b0a26969ef7d8b9987"
-            local_path = os.path.join(cache_base, "models--Qwen--Qwen2.5-0.5B", "snapshots", snapshot_id)
-            print(f"[INFO] Loading HF model from local path: {local_path}")
-            self.tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
-            model_dtype = torch.float16 if (self.device == "cuda" and low_vram) else torch.float32
-            self.model = AutoModelForCausalLM.from_pretrained(
-                local_path, 
-                local_files_only=True,
-                torch_dtype=model_dtype,
-                low_cpu_mem_usage=True,
-            ).to(self.device)
-        else:
-            print(f"[INFO] Loading HF model from Hub: {model_name}")
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-            model_dtype = torch.float16 if (self.device == "cuda" and low_vram) else torch.float32
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=model_dtype,
-                low_cpu_mem_usage=True,
-            ).to(self.device)
+        # Resolve local cache path
+        cache_base = os.path.expanduser("~/.cache/huggingface/hub")
+        snapshot_id = "060db6499f32faf8b98477b0a26969ef7d8b9987"
+        local_path = os.path.join(cache_base, "models--Qwen--Qwen2.5-0.5B", "snapshots", snapshot_id)
+        
+        print(f"[INFO] Loading HF model from: {local_path}")
+        self.tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
+        model_dtype = torch.float16 if (self.device == "cuda" and low_vram) else torch.float32
+        self.model = AutoModelForCausalLM.from_pretrained(
+            local_path, 
+            local_files_only=True,
+            torch_dtype=model_dtype,
+            low_cpu_mem_usage=True,
+        ).to(self.device)
 
         if hasattr(self.model.config, "use_cache"):
             self.model.config.use_cache = False
@@ -212,13 +430,36 @@ class HFModelWrapper(nn.Module):
             self.layers = self.model.model.layers
         elif hasattr(self.model, 'transformer') and hasattr(self.model.transformer, 'h'):
             self.layers = self.model.transformer.h
-        elif hasattr(self.model, 'h'):
-            self.layers = self.model.h
         else:
             self.layers = []
 
         self.dataset = None
         self._cached_base_loss = None
+        self.topology_warmup_steps = 50
+        self._topology_step = 0
+        self._can_output_attentions = can_output_attentions(self.model.config)
+        self._is_moe_model = detect_moe_model(self.model.config)
+        self.last_topology_snapshot = None
+
+    def _forward_with_topology_capture(self, batch, step: int = None):
+        capture_step = self._topology_step if step is None else int(step)
+        output_attn = self._can_output_attentions and (capture_step < int(self.topology_warmup_steps))
+        outputs = self.model(
+            **batch,
+            output_attentions=output_attn,
+            output_router_logits=self._is_moe_model,
+            output_hidden_states=(capture_step < int(self.topology_warmup_steps)),
+            use_cache=True,
+            return_dict=True,
+        )
+        self.last_topology_snapshot = build_topology_snapshot(
+            outputs=outputs,
+            step=capture_step,
+            warmup_steps=int(self.topology_warmup_steps),
+            model_config=self.model.config,
+        )
+        self._topology_step = max(self._topology_step + 1, capture_step + 1)
+        return outputs
 
     def configure_bilevel_trainable_subset(self, train_last_n_layers: int = 1):
         """Freeze most weights so second-order bilevel steps fit commodity GPUs."""
@@ -227,12 +468,7 @@ class HFModelWrapper(nn.Module):
 
         n_layers = len(self.layers)
         keep_layers = list(range(max(0, n_layers - train_last_n_layers), n_layers))
-        
-        # Determine prefix based on model architecture
-        if "gpt2" in self.model_name.lower():
-            keep_prefixes = [f"transformer.h.{idx}." for idx in keep_layers]
-        else:
-            keep_prefixes = [f"model.layers.{idx}." for idx in keep_layers]
+        keep_prefixes = [f"model.layers.{idx}." for idx in keep_layers]
 
         trainable = 0
         for name, p in self.model.named_parameters():
@@ -240,7 +476,7 @@ class HFModelWrapper(nn.Module):
             if in_keep_layer and ("norm" in name or name.endswith("bias")):
                 p.requires_grad_(True)
                 trainable += p.numel()
-            elif name.startswith("model.norm") or name.startswith("transformer.ln_f"):
+            elif name.startswith("model.norm"):
                 p.requires_grad_(True)
                 trainable += p.numel()
 
@@ -288,7 +524,7 @@ class HFModelWrapper(nn.Module):
     def model_topology_loss(self, batch_size: int = 1, max_length: int = 192) -> torch.Tensor:
         """Compute a true LM loss (with grad) used for topology/kappa signals."""
         batch = self._sample_model_inputs(batch_size=batch_size, max_length=max_length)
-        outputs = self.model(**batch)
+        outputs = self._forward_with_topology_capture(batch)
         return outputs.loss
 
     @staticmethod
@@ -328,7 +564,7 @@ class HFModelWrapper(nn.Module):
         save_ctx = torch.autograd.graph.save_on_cpu(pin_memory=True) if self.low_vram else nullcontext()
         with save_ctx:
             if params_override is None:
-                outputs = self.model(**batch)
+                outputs = self._forward_with_topology_capture(batch)
             else:
                 remapped_params = OrderedDict()
                 for name, tensor in params_override.items():
@@ -351,7 +587,7 @@ class HFModelWrapper(nn.Module):
         """Create a surrogate loss that flows through hyperparams."""
         base = self._get_base_loss()
         # Create a differentiable surrogate that connects hyperparams to the loss
-        # This models: loss â‰ˆ base_loss * f(lr, wd) where f captures the effect
+        # This models: loss ≈ base_loss * f(lr, wd) where f captures the effect
         lr_penalty = sum(hyperparams.get_layer_lr(i) for i in range(len(self.layers)))
         wd_penalty = sum(hyperparams.get_layer_wd(i) for i in range(len(self.layers)))
         surrogate = base * (1.0 + 0.1 * lr_penalty) + 0.01 * wd_penalty
@@ -370,9 +606,9 @@ class HFModelWrapper(nn.Module):
         self._cached_base_loss = None
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ────────────────────────────────────────────────────────────────────
 # Demo Runner
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ────────────────────────────────────────────────────────────────────
 
 def run_demo(
     config: TaLBFGSConfig,
@@ -384,30 +620,29 @@ def run_demo(
     trainable_scope: str = "subset",
     low_vram: bool = False,
     hybrid_shard_fraction: float = 0.125,
-    hf_model_name: str = "Qwen/Qwen2.5-0.5B",
 ):
     """Run the bilevel optimization demo."""
 
     print("\n" + "=" * 60)
     print(
-        f"  ta-LBFGS Optimizer â€” {'Hugging Face' if use_hf else 'Synthetic'} Demo "
+        f"  ta-LBFGS Optimizer — {'Hugging Face' if use_hf else 'Synthetic'} Demo "
         f"({optimizer_mode})"
     )
     print("=" * 60)
 
-    # â”€â”€ Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Setup ────────────────────────────────────────────────────
     if use_hf and HAS_HF:
         resolved_scope = trainable_scope
         if trainable_scope == "full" and low_vram:
             resolved_scope = "hybrid"
             print("[INFO] Low-VRAM full scope requested. Auto-switching to hybrid hypergradient mode.")
 
-        model = HFModelWrapper(model_name=hf_model_name, low_vram=low_vram)
+        model = HFModelWrapper(low_vram=low_vram)
         
         # Load preprocessed reasoning trace cache.
         ds_path = get_default_dataset_path()
         seq_length = 32 if (low_vram and resolved_scope in {"full", "hybrid"}) else 64
-        cache_path = get_default_cache_path(config.output_dir, seq_length=seq_length, model_name=hf_model_name)
+        cache_path = get_default_cache_path(config.output_dir, seq_length=seq_length)
         model.dataset = load_or_build_reasoning_trace_cache(
             ds_path,
             tokenizer=model.tokenizer,
@@ -421,7 +656,7 @@ def run_demo(
             model.configure_bilevel_full_model()
             config.hybrid_hypergradient = True
             config.hybrid_shard_fraction = hybrid_shard_fraction
-            config.cg_max_iter = min(config.cg_max_iter, 2)
+            config.cg_max_iter = min(config.cg_max_iter, 1)
             print(
                 "[INFO] Hybrid hypergradient enabled: "
                 f"shard_fraction={config.hybrid_shard_fraction:.3f}, cg_max_iter={config.cg_max_iter}"
@@ -462,6 +697,7 @@ def run_demo(
     evasion_events = []
     grad_magnitudes = []
     kappa_changes = []
+    topology_components_history = []
     layer_kappa_histories = {f"block.{i}" if use_hf else f"layers.{i}": [] for i in range(n_layers)}
     layer_grad_histories = {f"block.{i}" if use_hf else f"layers.{i}": [] for i in range(n_layers)}
     layer_param_grad_history = {f"block.{i}" if use_hf else f"layers.{i}": [] for i in range(n_layers)}
@@ -470,7 +706,9 @@ def run_demo(
     landscape_mesh = generate_landscape_mesh(model, hyperparams, n_points=15)
     
     # Initialize Architecture Interceptor
-    interceptor = ArchitectureInterceptor(model)    # Dashboard
+    interceptor = ArchitectureInterceptor(model)
+
+    # Dashboard
     dashboard = TextualDashboard() if (use_dashboard and not use_web_dashboard) else None
     web_dashboard = DashboardServer(port=7860) if (use_dashboard and use_web_dashboard) else None
     if web_dashboard is not None:
@@ -484,6 +722,8 @@ def run_demo(
     pivot_steps = []
     spectral_guard_steps = []
     event_feed = []
+    chat_messages = []
+    active_chat = {"prompt": None, "batch": None}
     
     # Ground architectural variables (dropout, attn_temp) to the model
     interceptor.ground_architectural_variables(hyperparams)
@@ -496,6 +736,57 @@ def run_demo(
         if kappa_val > 10:
             return "Ill-Conditioned"
         return "Convex Bowl"
+
+    def maybe_pop_chat_prompt() -> None:
+        if web_dashboard is None:
+            return
+        prompt = web_dashboard.pop_prompt()
+        if not prompt:
+            return
+
+        prompt = prompt.strip()
+        if not prompt:
+            return
+
+        chat_messages.append({"role": "user", "text": prompt})
+        event_feed.append(f"chat prompt received ({len(prompt)} chars)")
+
+        if use_hf:
+            enc = model.tokenizer(
+                [prompt],
+                return_tensors="pt",
+                truncation=True,
+                max_length=256,
+                padding=True,
+            ).to(model.device)
+            enc["labels"] = enc["input_ids"]
+            active_chat["prompt"] = prompt
+            active_chat["batch"] = enc
+
+            try:
+                with torch.no_grad():
+                    gen = model.model.generate(
+                        **{k: v for k, v in enc.items() if k != "labels"},
+                        max_new_tokens=48,
+                        do_sample=False,
+                        pad_token_id=model.tokenizer.eos_token_id,
+                        eos_token_id=model.tokenizer.eos_token_id,
+                    )
+                p_len = int(enc["input_ids"].shape[1])
+                gen_ids = gen[0, p_len:] if gen.shape[1] > p_len else gen[0]
+                reply = model.tokenizer.decode(gen_ids, skip_special_tokens=True).strip() or "(no completion)"
+            except Exception as exc:
+                reply = f"(generation error: {exc})"
+            chat_messages.append({"role": "assistant", "text": reply})
+        else:
+            chat_messages.append({
+                "role": "assistant",
+                "text": "Synthetic mode does not run causal text generation. Switch to --model hf for chat-driven inference.",
+            })
+
+        if len(chat_messages) > 80:
+            del chat_messages[:-80]
+
     def publish_web_state(iter_idx: int, loss_val: float, hp_dict: dict, layer_data: dict, status: str = "running"):
         if web_dashboard is None:
             return
@@ -515,6 +806,8 @@ def run_demo(
 
         if len(event_feed) > 100:
             del event_feed[:-100]
+        experts_payload = _expert_rows_from_hparams(hp_dict, layer_data, n_experts=8)
+        chain_payload = _chain_payload(iter_idx, config.outer_steps, topology_valid_pct >= 80.0)
 
         web_dashboard.publish(
             {
@@ -533,16 +826,22 @@ def run_demo(
                     "valid_mask": valid_mask,
                 },
                 "head_buffers": head_buffers,
-                "experts": _expert_rows_from_hparams(hp_dict, layer_data, n_experts=8),
+                "experts": experts_payload,
                 "trajectory": {
                     "loss": [float(v) for v in loss_history],
                     "pivot_steps": pivot_steps[-64:],
                     "spectral_guard_steps": spectral_guard_steps[-64:],
                 },
-                "chain": _chain_payload(iter_idx, config.outer_steps, topology_valid_pct >= 80.0),
+                "chain": chain_payload,
+                "chat": {
+                    "messages": chat_messages[-40:],
+                    "pending_prompt_count": web_dashboard.pending_prompt_count(),
+                    "current_prompt": active_chat.get("prompt"),
+                },
                 "events": event_feed[-60:],
             }
         )
+
     def build_dashboard_layer_data(
         hp_dict: dict,
         iter_idx: int,
@@ -592,8 +891,9 @@ def run_demo(
 
                     batch_size = 1
                     for outer_iter in range(config.outer_steps):
-                        train_batch = sample_packed_batch(model.dataset, batch_size=batch_size, device=model.device)
-                        val_batch = sample_packed_batch(model.dataset, batch_size=batch_size, device=model.device)
+                        maybe_pop_chat_prompt()
+                        train_batch = active_chat["batch"] if active_chat["batch"] is not None else sample_packed_batch(model.dataset, batch_size=batch_size, device=model.device)
+                        val_batch = active_chat["batch"] if active_chat["batch"] is not None else sample_packed_batch(model.dataset, batch_size=batch_size, device=model.device)
                         grad_mag_holder = {"value": 0.0}
 
                         def closure():
@@ -622,13 +922,6 @@ def run_demo(
                             outer_iter,
                             grad_mag_holder["value"],
                         )
-                        publish_web_state(
-                            outer_iter,
-                            loss_val,
-                            hp_dict,
-                            layer_data,
-                            status="running",
-                        )
 
                         if dashboard:
                             outer_state = {
@@ -652,12 +945,37 @@ def run_demo(
                                 mesh=landscape_mesh,
                             )
 
+                        publish_web_state(
+                            outer_iter,
+                            loss_val,
+                            hp_dict,
+                            layer_data,
+                            status="running",
+                        )
+                        active_chat["batch"] = None
+                        active_chat["prompt"] = None
+
                         if dashboard:
                             dashboard.call_from_thread(
                                 dashboard.update_log,
                                 f"[cyan]classic-lbfgs[/] step {outer_iter+1}/{config.outer_steps} | "
                                 f"loss={loss_val:.4f}"
                             )
+                    if web_dashboard is not None and hyperparam_history:
+                        final_idx = max(len(loss_history) - 1, 0)
+                        final_hp = hyperparam_history[-1]
+                        final_layer_data = build_dashboard_layer_data(
+                            final_hp,
+                            final_idx,
+                            grad_magnitudes[-1] if grad_magnitudes else 0.0,
+                        )
+                        publish_web_state(
+                            final_idx,
+                            float(loss_history[-1]) if loss_history else 0.0,
+                            final_hp,
+                            final_layer_data,
+                            status="completed",
+                        )
                     return
 
                 bilevel_opt = BilevelOptimizer(config)
@@ -669,16 +987,28 @@ def run_demo(
                 val_batch = sample_packed_batch(model.dataset, batch_size=batch_size, device=model.device)
 
                 def hf_train_fn(model_obj, batch, hp, params_override=None):
+                    maybe_pop_chat_prompt()
+                    if active_chat["batch"] is not None:
+                        batch = active_chat["batch"]
                     return model_obj.distillation_loss(batch, hp, params_override=params_override)
 
                 def hf_val_fn(model_obj, batch, hp, params_override=None):
+                    if active_chat["batch"] is not None:
+                        batch = active_chat["batch"]
                     return model_obj.distillation_loss(batch, hp, params_override=params_override)
 
                 def on_bilevel_progress(step_info):
+                    # Drain queued chat prompt at each outer progress update so
+                    # dashboard prompts are routed to HF generation promptly.
+                    maybe_pop_chat_prompt()
                     hp_dict = step_info["hyperparams"]
                     loss_val = float(step_info["val_loss"])
                     grad_mag = float(step_info["grad_magnitude"])
                     iter_idx = int(step_info["iteration"]) - 1
+                    sens = step_info.get("sensitivity_debug") or {}
+                    disconnect_step = sens.get("first_suspected_disconnect_step")
+                    secant_proxy = -1e-3 if disconnect_step is not None else 1e-2
+                    layer_data = build_dashboard_layer_data(hp_dict, iter_idx, grad_mag, secant_proxy=secant_proxy)
 
                     loss_history.append(loss_val)
                     hyperparam_history.append(hp_dict)
@@ -687,11 +1017,15 @@ def run_demo(
                     nonlocal best_loss
                     best_loss = min(best_loss, best_local)
 
-                    sens = step_info.get("sensitivity_debug") or {}
-                    disconnect_step = sens.get("first_suspected_disconnect_step")
-                    secant_proxy = -1e-3 if disconnect_step is not None else 1e-2
-                    layer_data = build_dashboard_layer_data(hp_dict, iter_idx, grad_mag, secant_proxy=secant_proxy)
-                    publish_web_state(iter_idx, loss_val, hp_dict, layer_data, status="running")
+                    publish_web_state(
+                        iter_idx,
+                        loss_val,
+                        hp_dict,
+                        layer_data,
+                        status="running",
+                    )
+                    active_chat["batch"] = None
+                    active_chat["prompt"] = None
 
                     if dashboard:
                         outer_state = {
@@ -720,6 +1054,7 @@ def run_demo(
                                 "[bold red]Sensitivity disconnect suspected[/] "
                                 f"at inner step {disconnect_step}"
                             )
+
                 result = bilevel_opt.optimize(
                     model,
                     hf_train_fn,
@@ -731,21 +1066,39 @@ def run_demo(
                     progress_callback=on_bilevel_progress,
                 )
                 best_loss = min(best_loss, result["best_loss"])
+                disconnect_step = None
+                if result.get("inner_sensitivity_debug"):
+                    disconnect_step = result["inner_sensitivity_debug"][0].get("first_suspected_disconnect_step")
                 if dashboard:
-                    disconnect_step = None
-                    if result.get("inner_sensitivity_debug"):
-                        disconnect_step = result["inner_sensitivity_debug"][0].get("first_suspected_disconnect_step")
                     dashboard.call_from_thread(
                         dashboard.update_log,
                         f"[green]HF bilevel completed[/] | best={result['best_loss']:.4f} | "
                         f"disconnect_step={disconnect_step}"
+                    )
+                if web_dashboard is not None and hyperparam_history:
+                    final_idx = max(len(loss_history) - 1, 0)
+                    final_hp = hyperparam_history[-1]
+                    secant_proxy = -1e-3 if disconnect_step is not None else 1e-2
+                    final_layer_data = build_dashboard_layer_data(
+                        final_hp,
+                        final_idx,
+                        grad_magnitudes[-1] if grad_magnitudes else 0.0,
+                        secant_proxy=secant_proxy,
+                    )
+                    publish_web_state(
+                        final_idx,
+                        float(loss_history[-1]) if loss_history else 0.0,
+                        final_hp,
+                        final_layer_data,
+                        status="completed",
                     )
                 return
 
             prev_avg_kappa = 1.0
 
             for outer_iter in range(config.outer_steps):
-                # â”€â”€ Inner Loop (simplified: single forward) â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                maybe_pop_chat_prompt()
+                # ── Inner Loop (simplified: single forward) ─────────
                 hyperparams.zero_grad()
 
                 train_loss = model.train_loss(hyperparams)
@@ -756,7 +1109,7 @@ def run_demo(
                 if loss_val < best_loss:
                     best_loss = loss_val
 
-                # â”€â”€ Hypergradient â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                # ── Hypergradient ───────────────────────────────────
                 val_loss.backward(retain_graph=True)
 
                 grad_mag = sum(
@@ -786,7 +1139,12 @@ def run_demo(
                         else:
                             p.grad = g.detach()
 
-                # â”€â”€ Outer Step (Layerwise ta-LBFGS) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                    if model.last_topology_snapshot is not None:
+                        snap = dict(model.last_topology_snapshot)
+                        snap["grad_norm"] = float(grad_mag)
+                        ta_lbfgs_opt.ingest_topology_snapshot(snap)
+
+                # ── Outer Step (Layerwise ta-LBFGS) ─────────────────
                 # We iterate through layers and apply the ta-LBFGS update
                 # using the pre-computed kappa for each layer block.
                 
@@ -811,7 +1169,7 @@ def run_demo(
                 hp_dict = hyperparams.as_float_dict()
                 hyperparam_history.append(hp_dict)
 
-                # â”€â”€ Per-Layer Topology Analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                # ── Per-Layer Topology Analysis ─────────────────────
                 layer_data = {}
                 avg_kappa = 0.0
 
@@ -910,7 +1268,7 @@ def run_demo(
                         "iteration": outer_iter,
                     }
 
-                    # â”€â”€ PERFORM ta-LBFGS STEP FOR THIS LAYER â”€â”€â”€â”€â”€â”€â”€â”€
+                    # ── PERFORM ta-LBFGS STEP FOR THIS LAYER ────────
                     # This replaces the manual SGD update with a topology-aware search
                     ta_lbfgs_opt.step_layer(
                         name, 
@@ -933,7 +1291,15 @@ def run_demo(
                     loss=loss_val,
                 )
 
-                # â”€â”€ Dashboard Update â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                # ── Build Topology Components for This Step ────────
+                topo_components = _topology_components_from_layer_data(
+                    layer_data, 
+                    outer_iter,
+                    max_memory_size=config.lbfgs_memory_max
+                )
+                topology_components_history.append(topo_components)
+
+                # ── Dashboard Update ────────────────────────────────
                 if dashboard:
                     outer_state = {
                         "iteration": outer_iter + 1,
@@ -967,19 +1333,25 @@ def run_demo(
                         mesh=landscape_mesh
                     )
 
-                # â”€â”€ Incremental HTML Update (Periodically) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                publish_web_state(
+                    outer_iter,
+                    loss_val,
+                    hp_dict,
+                    layer_data,
+                    status="running",
+                )
+
+                # ── Incremental Topology HTML Update (Periodically) ──────────
                 if outer_iter % 10 == 0:
                     try:
-                        # Ensure we detach for numpy conversion
-                        hp_array = np.array([
-                            [x.detach().item() if isinstance(x, torch.Tensor) else x for x in (h["lr"] + h["wd"])]
-                            for h in hyperparam_history
-                        ])
-                        traj_path = os.path.join(config.output_dir, "live_trajectory.html")
-                        export_trajectory_3d(
-                            hp_array, np.array(loss_history), 
-                            traj_path, mesh_data=landscape_mesh
-                        )
+                        if topology_components_history:
+                            layer_names = [f"block.{i}" if use_hf else f"layers.{i}" for i in range(n_layers)]
+                            live_topo_path = os.path.join(config.output_dir, "live_topology_components_3d.html")
+                            _build_topology_3d_html(
+                                topology_components_history,
+                                layer_names,
+                                live_topo_path,
+                            )
                     except:
                         pass
 
@@ -992,7 +1364,7 @@ def run_demo(
 
                 # Log iteration to TUI
                 if dashboard:
-                    mode_str = f"[cyan]HF/{model.model_name.split('/')[-1]}[/]" if use_hf else "[cyan]Synthetic[/]"
+                    mode_str = "[cyan]HF/Qwen[/]" if use_hf else "[cyan]Synthetic[/]"
                     dashboard.call_from_thread(
                         dashboard.update_log,
                         f"[dim]Step {outer_iter+1}/{config.outer_steps}[/] | {mode_str} | Loss: {loss_val:.4f} | Best: {best_loss:.4f}"
@@ -1008,50 +1380,191 @@ def run_demo(
                 dashboard.call_from_thread(dashboard.update_log, f"[bold red]{err_msg}[/]")
             else:
                 print(err_msg)
+            if web_dashboard is not None:
+                web_dashboard.publish(
+                    {
+                        "run": {
+                            "status": "error",
+                            "val_loss": float(loss_history[-1]) if loss_history else 0.0,
+                            "outer_step": int(len(loss_history)),
+                            "max_outer_steps": int(config.outer_steps),
+                            "mean_kappa": 1.0,
+                            "topology_valid_pct": 0.0,
+                        },
+                        "heatmap": {
+                            "num_layers": int(n_layers),
+                            "heads_per_layer": 8,
+                            "kappa": [],
+                            "valid_mask": [],
+                        },
+                        "head_buffers": {},
+                        "experts": {"rows": [], "active_count": 0, "expired_ttl": 0},
+                        "trajectory": {
+                            "loss": [float(v) for v in loss_history],
+                            "pivot_steps": pivot_steps[-64:],
+                            "spectral_guard_steps": spectral_guard_steps[-64:],
+                        },
+                        "chain": _chain_payload(max(len(loss_history) - 1, 0), max(config.outer_steps, 1), False),
+                        "chat": {
+                            "messages": chat_messages[-40:],
+                            "pending_prompt_count": web_dashboard.pending_prompt_count(),
+                            "current_prompt": None,
+                        },
+                        "events": [f"run error: {e}"],
+                    }
+                )
 
         # Final signal
         if dashboard:
             dashboard.call_from_thread(
                 dashboard.update_log, 
-                "[bold green]âœ” OPTIMIZATION COMPLETE. Press 'q' to view summary and exit.[/]"
+                "[bold green]✔ OPTIMIZATION COMPLETE. Press 'q' to view summary and exit.[/]"
+            )
+        if web_dashboard is not None:
+            web_dashboard.publish(
+                {
+                    "run": {
+                        "status": "completed",
+                        "val_loss": float(loss_history[-1]) if loss_history else 0.0,
+                        "outer_step": int(len(loss_history)),
+                        "max_outer_steps": int(config.outer_steps),
+                        "mean_kappa": 1.0,
+                        "topology_valid_pct": 100.0,
+                    },
+                    "heatmap": {
+                        "num_layers": int(n_layers),
+                        "heads_per_layer": 8,
+                        "kappa": [],
+                        "valid_mask": [],
+                    },
+                    "head_buffers": {},
+                    "experts": {"rows": [], "active_count": 0, "expired_ttl": 0},
+                    "trajectory": {
+                        "loss": [float(v) for v in loss_history],
+                        "pivot_steps": pivot_steps[-64:],
+                        "spectral_guard_steps": spectral_guard_steps[-64:],
+                    },
+                    "chain": _chain_payload(max(len(loss_history) - 1, 0), max(config.outer_steps, 1), True),
+                    "chat": {
+                        "messages": chat_messages[-40:],
+                        "pending_prompt_count": web_dashboard.pending_prompt_count(),
+                        "current_prompt": None,
+                    },
+                    "events": ["run complete"],
+                }
             )
 
-    # Run
+        # ── Export Topology Components (within optimization_task scope) ────
+        output_dir = config.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Export Topology Components 3D Surface (instead of trajectory)
+        if topology_components_history:
+            layer_names = [f"block.{i}" if use_hf else f"layers.{i}" for i in range(n_layers)]
+            topo_path = os.path.join(output_dir, "topology_components_3d.html")
+            _build_topology_3d_html(
+                topology_components_history,
+                layer_names,
+                topo_path,
+            )
+        elif layer_kappa_histories and any(len(v) > 0 for v in layer_kappa_histories.values()):
+            layer_names = [f"block.{i}" if use_hf else f"layers.{i}" for i in range(n_layers)]
+            steps = max(len(layer_kappa_histories.get(name, [])) for name in layer_names)
+            fallback_history = []
+            for t in range(steps):
+                mat = np.zeros((len(layer_names), 5), dtype=np.float64)
+                for li, name in enumerate(layer_names):
+                    hist = layer_kappa_histories.get(name, [])
+                    kappa = float(hist[t]) if t < len(hist) else (float(hist[-1]) if hist else 1.0)
+                    attn = np.log1p(max(1.0, kappa))
+                    mat[li, :] = [attn, 0.5 * attn, 0.25 * attn, 0.35 * attn, 0.45 * attn]
+                fallback_history.append(mat)
+
+            topo_path = os.path.join(output_dir, "topology_components_3d.html")
+            _build_topology_3d_html(fallback_history, layer_names, topo_path)
+
+        if grad_magnitudes:
+            dynamics_path = os.path.join(output_dir, "dynamics.png")
+            plot_dynamics(loss_history, grad_magnitudes, kappa_changes, hyperparam_history, dynamics_path)
+            print(f"\n  Dynamics plot exported to: {dynamics_path}")
+
+        if hyperparam_history:
+            hp_plot_path = os.path.join(output_dir, "hyperparameters.png")
+            plot_hyperparameter_trajectories(hyperparam_history, hp_plot_path)
+            print(f"  Hyperparameter plot exported to: {hp_plot_path}")
+
+        # ── Summary ─────────────────────────────────────────────────
+        hp_dict = hyperparams.as_float_dict()
+        print(f"\n{'=' * 60}")
+        print(f"  Final Optimization Results Summary")
+        print(f"{'=' * 60}")
+        print(f"  Best Validation Loss:  {best_loss:.6f}")
+        
+        # Handle per-layer lists for clean display
+        def format_val(v):
+            if isinstance(v, list):
+                return f"[{', '.join(f'{x:.4e}' for x in v[:4])}{'...' if len(v) > 4 else ''}]"
+            return f"{v:.4e}"
+
+        print(f"  Final LR (per-layer):  {format_val(hp_dict['lr'])}")
+        print(f"  Final WD (per-layer):  {format_val(hp_dict['wd'])}")
+        print(f"  Final Dropout:         {format_val(hp_dict['dropout'])}")
+        print(f"  Final Attn Temp:       {format_val(hp_dict['attn_temp'])}")
+        print(f"  Label Smoothing:       {hp_dict['label_smoothing']:.6f}")
+        print(f"  Total Evasion Events:  {len(evasion_events)}")
+        print(f"  Steps Completed:       {len(loss_history)} / {config.outer_steps}")
+        print(f"{'=' * 60}\n")
+
+    # ── Run ──────────────────────────────────────────────────────
     if dashboard:
         thread = threading.Thread(target=optimization_task)
         thread.start()
         dashboard.run()
         thread.join()
     else:
+        # Run sync in main thread
         optimization_task()
 
     if web_dashboard is not None:
         hold_s = max(0.0, float(web_hold_seconds))
         if hold_s > 0.0:
-            print(f"[INFO] Web dashboard will stay up for {hold_s:.1f}s at {web_dashboard.base_url}")
+            print(
+                f"[INFO] Web dashboard will stay up for {hold_s:.1f}s at "
+                f"{web_dashboard.base_url}"
+            )
             time.sleep(hold_s)
         web_dashboard.stop()
 
-    # â”€â”€ Export Visualizations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Export Visualizations ────────────────────────────────────
     output_dir = config.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    if config.export_trajectory_3d and len(hyperparam_history) > 2:
-        # Flatten per-layer lr/wd into feature array for trajectory viz
-        hp_array = np.array([
-            [x.detach().item() if isinstance(x, torch.Tensor) else x for x in (h["lr"] + h["wd"])]
-            for h in hyperparam_history
-        ])
-        loss_array = np.array(loss_history)
-
-        trajectory_path = os.path.join(output_dir, "trajectory_3d.html")
-        export_trajectory_3d(
-            hp_array,
-            loss_array,
-            trajectory_path,
-            mesh_instance=get_adaptive_mesh(n_points=15),
+    # Export Topology Components 3D Surface (instead of trajectory)
+    if topology_components_history:
+        layer_names = [f"block.{i}" if use_hf else f"layers.{i}" for i in range(n_layers)]
+        topo_path = os.path.join(output_dir, "topology_components_3d.html")
+        _build_topology_3d_html(
+            topology_components_history,
+            layer_names,
+            topo_path,
         )
-        print(f"\n  3D Trajectory exported to: {trajectory_path}")
+    elif layer_kappa_histories and any(len(v) > 0 for v in layer_kappa_histories.values()):
+        layer_names = [f"block.{i}" if use_hf else f"layers.{i}" for i in range(n_layers)]
+        steps = max(len(layer_kappa_histories.get(name, [])) for name in layer_names)
+        fallback_history = []
+        for t in range(steps):
+            mat = np.zeros((len(layer_names), 5), dtype=np.float64)
+            for li, name in enumerate(layer_names):
+                hist = layer_kappa_histories.get(name, [])
+                kappa = float(hist[t]) if t < len(hist) else (float(hist[-1]) if hist else 1.0)
+                attn = np.log1p(max(1.0, kappa))
+                mat[li, :] = [attn, 0.5 * attn, 0.25 * attn, 0.35 * attn, 0.45 * attn]
+            fallback_history.append(mat)
+
+        topo_path = os.path.join(output_dir, "topology_components_3d.html")
+        _build_topology_3d_html(fallback_history, layer_names, topo_path)
+    else:
+        print(f"  [DEBUG] topology_components_history is empty ({len(topology_components_history)} items)")
 
     if grad_magnitudes:
         dynamics_path = os.path.join(output_dir, "dynamics.png")
@@ -1063,7 +1576,7 @@ def run_demo(
         plot_hyperparameter_trajectories(hyperparam_history, hp_plot_path)
         print(f"  Hyperparameter plot exported to: {hp_plot_path}")
 
-    # â”€â”€ Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Summary ─────────────────────────────────────────────────
     hp_dict = hyperparams.as_float_dict()
     print(f"\n{'=' * 60}")
     print(f"  Final Optimization Results Summary")
@@ -1093,15 +1606,14 @@ def run_demo(
     }
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ────────────────────────────────────────────────────────────────────
 # CLI Entry Point
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="ta-LBFGS Optimizer â€” Synthetic Bilevel Demo"
+        description="ta-LBFGS Optimizer — Synthetic Bilevel Demo"
     )
-    parser.add_argument("--outer-steps", type=int, default=40)
     parser.add_argument("--inner-steps", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=1e-2)
@@ -1112,12 +1624,12 @@ def main():
     parser.add_argument("--trainable-scope", type=str, default="subset", choices=["subset", "full", "hybrid"])
     parser.add_argument("--low-vram", action="store_true")
     parser.add_argument("--hybrid-shard-fraction", type=float, default=0.125)
-    parser.add_argument("--textual-dashboard", action="store_true")
     parser.add_argument("--web-hold-seconds", type=float, default=20.0)
+    
+    
     args = parser.parse_args()
 
     config = TaLBFGSConfig(
-        outer_steps=args.outer_steps,
         inner_steps=args.inner_steps,
         initial_lr=args.lr,
         initial_weight_decay=args.wd,
@@ -1129,7 +1641,7 @@ def main():
             run_demo(
                 config,
                 use_dashboard=not args.no_dashboard,
-                use_web_dashboard=(not args.textual_dashboard),
+                use_web_dashboard=True,
                 web_hold_seconds=args.web_hold_seconds,
                 use_hf=True,
                 optimizer_mode=args.optimizer,
@@ -1143,7 +1655,7 @@ def main():
             run_demo(
                 config,
                 use_dashboard=not args.no_dashboard,
-                use_web_dashboard=(not args.textual_dashboard),
+                use_web_dashboard=True,
                 web_hold_seconds=args.web_hold_seconds,
                 use_hf=False,
                 optimizer_mode=args.optimizer,
@@ -1155,7 +1667,7 @@ def main():
         run_demo(
             config,
             use_dashboard=not args.no_dashboard,
-            use_web_dashboard=(not args.textual_dashboard),
+            use_web_dashboard=True,
             web_hold_seconds=args.web_hold_seconds,
             use_hf=False,
             optimizer_mode=args.optimizer,
@@ -1167,7 +1679,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-

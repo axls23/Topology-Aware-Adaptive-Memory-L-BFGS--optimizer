@@ -5,11 +5,12 @@
 ### Files Created/Modified
 
 #### ✅ `/web-ui/topology3d.js` (Already Present)
+
 - **Status**: Complete with all 5 field renderers
 - **Key Functions**:
   - `init()` - WebGL setup, 5 scenes, lighting
   - `buildLandscapeField()` - Surface curvature renderer
-  - `buildAttentionField()` - Head mask planes  
+  - `buildAttentionField()` - Head mask planes
   - `buildExpertField()` - Expert routing network
   - `buildResidualField()` - Layer coupling landscape
   - `buildChainField()` - Gradient trajectory tube
@@ -20,21 +21,26 @@
 - **No Errors**: ✅ Verified
 
 #### ✅ `/web-ui/app.js` (Modified)
+
 **Integration Point 1: simulateStep() → Topo3D.simulateStep()**
+
 - **Location**: Line 369-376
 - **Code**:
+
   ```javascript
   SIM.step++;
   updateDashboardUI();
-  
+
   // Update 3D topology visualization with synthetic data
   if (window.Topo3D && window.Topo3D.simulateStep) {
     window.Topo3D.simulateStep(SIM.step);
   }
   ```
+
 - **Purpose**: Synchronize standalone simulation with 3D visualization
 
 **Integration Point 2: trySSEConnection() → Topo3D.update()**
+
 - **Location**: Line 515-528
 - **Code**:
   ```javascript
@@ -42,19 +48,20 @@
     try {
       const data = JSON.parse(ev.data);
       if (data.run) {
-        dot.className = 'status-dot online';
+        dot.className = "status-dot online";
         text.textContent = `Live — Step ${data.run.outer_step}`;
       }
       // Wire topology_3d data to Topo3D visualization
       if (data.topology_3d && window.Topo3D && window.Topo3D.update) {
         window.Topo3D.update(data.topology_3d);
       }
-    } catch(e) {}
+    } catch (e) {}
   };
   ```
 - **Purpose**: Stream live optimizer state to 3D visualization
 
 **Integration Point 3: resetSimulation() → Topo3D.simulateStep(0)**
+
 - **Location**: Line 498-500
 - **Code**:
   ```javascript
@@ -67,18 +74,23 @@
 - **No Errors**: ✅ Verified
 
 #### ✅ `/web-ui/index.html` (Already Configured)
+
 **Script Loading Setup**
+
 - **Location**: Lines 407-413 (end of file)
 - **Code**:
   ```html
-  <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+  <script
+    async
+    src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"
+  ></script>
   <script type="importmap">
-  {
-    "imports": {
-      "three": "https://unpkg.com/three@0.168.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.168.0/examples/jsm/"
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.168.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.168.0/examples/jsm/"
+      }
     }
-  }
   </script>
   <script src="app.js"></script>
   <script type="module" src="topology3d.js"></script>
@@ -86,6 +98,7 @@
 - **Purpose**: Load Three.js and topology3d.js module
 
 **HTML Containers**
+
 - **Canvas Container**: Line 321-336
   ```html
   <div class="topo3d-container" id="topo3dContainer">
@@ -108,6 +121,7 @@
 ## 🔄 Data Flow Verification
 
 ### Standalone Mode (Simulation)
+
 ```
 ✅ User clicks "Start Simulation"
   ↓
@@ -127,7 +141,7 @@
   ↓
 ✅ updateLandscapeData() updates mesh geometry
 ✅ updateAttentionData() updates planes
-✅ updateExpertData() updates nodes/edges  
+✅ updateExpertData() updates nodes/edges
 ✅ updateResidualData() updates surface
 ✅ updateChainData() updates tube
   ↓
@@ -135,6 +149,7 @@
 ```
 
 ### Live Mode (SSE Connection)
+
 ```
 ✅ Page loads → trySSEConnection() fires
   ↓
@@ -162,6 +177,7 @@
 ## 🎯 Five Field Renderers
 
 ### Field 1: Landscape Curvature
+
 - ✅ **Data Source**: `data.landscape_field`
 - ✅ **Generator**: `generateSyntheticLandscape(step)`
 - ✅ **Updater**: `updateLandscapeData(data)`
@@ -171,7 +187,8 @@
 - ✅ **Animations**: Evasion particle rise & fade
 - ✅ **Controls**: Camera preset [6, 5, 8]
 
-### Field 2: Attention Topology  
+### Field 2: Attention Topology
+
 - ✅ **Data Source**: `data.attention_field`
 - ✅ **Generator**: `generateSyntheticAttention(step)`
 - ✅ **Updater**: `updateAttentionData(data)`
@@ -182,16 +199,18 @@
 - ✅ **Controls**: Camera preset [5, 6, 5]
 
 ### Field 3: Expert Routing
+
 - ✅ **Data Source**: `data.expert_field`
 - ✅ **Generator**: `generateSyntheticExpert(step)`
 - ✅ **Updater**: `updateExpertData(data)`
 - ✅ **Geometry**: SphereGeometry (nodes) + LineSegments (edges)
-- ✅ **Node Layout**: Circular (angle = i/n * 2π, radius = 3)
+- ✅ **Node Layout**: Circular (angle = i/n \* 2π, radius = 3)
 - ✅ **Size Mapping**: `scale = 0.2 + 0.4 * load_freq`
 - ✅ **Animations**: Node pulsing if active
 - ✅ **Controls**: Camera preset [7, 4, 7]
 
 ### Field 4: Residual Coupling
+
 - ✅ **Data Source**: `data.residual_field`
 - ✅ **Generator**: `generateSyntheticResidual(step)`
 - ✅ **Updater**: `updateResidualData(data)`
@@ -202,6 +221,7 @@
 - ✅ **Controls**: Camera preset [5, 5, 7]
 
 ### Field 5: Reasoning Chain
+
 - ✅ **Data Source**: `data.chain_field`
 - ✅ **Generator**: `generateSyntheticChain(step)`
 - ✅ **Updater**: `updateChainData(data)`
@@ -215,19 +235,20 @@
 
 ## 🎮 User Controls
 
-| Control | Function | Line | Status |
-|---------|----------|------|--------|
-| Tab buttons | `switchTopoField(field)` | 799-829 | ✅ Working |
-| Auto rotate | `toggleAutoRotate()` | 831-836 | ✅ Working |
-| Reset camera | `resetTopoCamera()` | 838-846 | ✅ Working |
-| Legend display | `updateLegend(field)` | 848-876 | ✅ Working |
-| Info overlay | `updateInfoOverlay(field)` | 878-887 | ✅ Working |
+| Control        | Function                   | Line    | Status     |
+| -------------- | -------------------------- | ------- | ---------- |
+| Tab buttons    | `switchTopoField(field)`   | 799-829 | ✅ Working |
+| Auto rotate    | `toggleAutoRotate()`       | 831-836 | ✅ Working |
+| Reset camera   | `resetTopoCamera()`        | 838-846 | ✅ Working |
+| Legend display | `updateLegend(field)`      | 848-876 | ✅ Working |
+| Info overlay   | `updateInfoOverlay(field)` | 878-887 | ✅ Working |
 
 ---
 
 ## 📊 Integration Summary
 
 ### SSE Data Path
+
 ```
 Server (port 7860)
   ↓
@@ -247,6 +268,7 @@ Dynamic animation loop
 ```
 
 ### Standalone Data Path
+
 ```
 startSimulation() button
   ↓
@@ -270,11 +292,13 @@ Dynamic animation loop
 ## 🧪 Quick Test Checklist
 
 ### Prerequisites
+
 - [ ] Web browser with WebGL support (Chrome, Firefox, Safari)
 - [ ] No console errors: Check DevTools → Console tab
 - [ ] JavaScript enabled
 
 ### Standalone Mode (No Server)
+
 - [ ] Load page in browser
 - [ ] Navigate to "Dashboard" section
 - [ ] Click "Start Simulation"
@@ -288,6 +312,7 @@ Dynamic animation loop
 - [ ] Verify legend updates per field
 
 ### Live Mode (With Server)
+
 - [ ] Terminal 1: `python -m ta_lbfgs.dashboard.server`
 - [ ] Browser: Page loads → status shows "Connected" (not "Standalone")
 - [ ] Terminal 2: Run optimizer with `--dashboard` flag
@@ -296,6 +321,7 @@ Dynamic animation loop
 - [ ] Verify all 5 fields show server data (not synthetic)
 
 ### Reset Behavior
+
 - [ ] Click "Start Simulation"
 - [ ] Wait 5-10 steps
 - [ ] Click "Reset"
@@ -309,45 +335,50 @@ Dynamic animation loop
 ## 📝 Configuration Reference
 
 ### Camera Presets (topology3d.js)
+
 ```javascript
 const cameraPresets = {
   landscape: { pos: [6, 5, 8], target: [0, 1, 0] },
   attention: { pos: [5, 6, 5], target: [0, 2, 0] },
-  expert:    { pos: [7, 4, 7], target: [0, 2, 0] },
-  residual:  { pos: [5, 5, 7], target: [0, 1, 0] },
-  chain:     { pos: [8, 3, 4], target: [0, 2, 0] },
+  expert: { pos: [7, 4, 7], target: [0, 2, 0] },
+  residual: { pos: [5, 5, 7], target: [0, 1, 0] },
+  chain: { pos: [8, 3, 4], target: [0, 2, 0] },
 };
 ```
 
 ### Color Palette (topology3d.js)
+
 ```javascript
 const C = {
-  bg:       0x09090b,   // #09090b (dark)
-  grid:     0x222228,   // #222228 (grid)
-  accent1:  0x6366f1,   // #6366f1 (indigo)
-  accent2:  0xa855f7,   // #a855f7 (purple)
-  accent3:  0xec4899,   // #ec4899 (pink)
-  green:    0x22c55e,   // #22c55e (positive)
-  amber:    0xf59e0b,   // #f59e0b (warning)
-  red:      0xef4444,   // #ef4444 (alert)
-  teal:     0x14b8a6,   // #14b8a6 (info)
-  blue:     0x3b82f6,   // #3b82f6 (secondary)
-  white:    0xfafafa,   // #fafafa (text)
+  bg: 0x09090b, // #09090b (dark)
+  grid: 0x222228, // #222228 (grid)
+  accent1: 0x6366f1, // #6366f1 (indigo)
+  accent2: 0xa855f7, // #a855f7 (purple)
+  accent3: 0xec4899, // #ec4899 (pink)
+  green: 0x22c55e, // #22c55e (positive)
+  amber: 0xf59e0b, // #f59e0b (warning)
+  red: 0xef4444, // #ef4444 (alert)
+  teal: 0x14b8a6, // #14b8a6 (info)
+  blue: 0x3b82f6, // #3b82f6 (secondary)
+  white: 0xfafafa, // #fafafa (text)
 };
 ```
 
 ### Simulation Settings (app.js)
+
 ```javascript
 const SIM = {
   running: false,
   step: 0,
-  maxSteps: 40,        // Total simulation steps
+  maxSteps: 40, // Total simulation steps
   interval: null,
   // ... (history arrays)
 };
 
 // Simulation tick rate
-setInterval(() => { simulateStep(); }, 300);  // 300ms per step
+setInterval(() => {
+  simulateStep();
+}, 300); // 300ms per step
 ```
 
 ---
@@ -377,9 +408,10 @@ def _empty_state():
 ```
 
 The SSE handler in `app.js` catches this and routes to Topo3D:
+
 ```javascript
 if (data.topology_3d && window.Topo3D && window.Topo3D.update) {
-  window.Topo3D.update(data.topology_3d);  // Line 527
+  window.Topo3D.update(data.topology_3d); // Line 527
 }
 ```
 
@@ -388,6 +420,7 @@ if (data.topology_3d && window.Topo3D && window.Topo3D.update) {
 ## ✨ Summary
 
 ✅ **Complete Implementation**:
+
 - 5 field renderers with Three.js
 - Standalone simulation mode
 - SSE data wiring to real optimizer
@@ -397,6 +430,7 @@ if (data.topology_3d && window.Topo3D && window.Topo3D.update) {
 - No syntax errors
 
 ✅ **Ready for Deployment**:
+
 - Works in browser without server (standalone)
 - Auto-connects to server when available (SSE mode)
 - Graceful fallback to standalone
@@ -404,8 +438,8 @@ if (data.topology_3d && window.Topo3D && window.Topo3D.update) {
 - All 5 fields render and update correctly
 
 **Next Steps**:
+
 1. Test in browser (standalone) ✅
 2. Test with live server (when available)
 3. Optional: Add keyboard shortcuts for field switching
 4. Optional: Add recording/export functionality
-

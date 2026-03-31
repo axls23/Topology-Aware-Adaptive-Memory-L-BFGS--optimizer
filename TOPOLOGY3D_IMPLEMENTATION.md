@@ -11,6 +11,7 @@ The **Topology3D visualization system** renders five evolving 3D fields that cap
 ### Core Components
 
 #### 1. **topology3d.js** (ES Module)
+
 Main visualization engine with Three.js integration.
 
 ```
@@ -54,15 +55,18 @@ Main visualization engine with Three.js integration.
 ```
 
 #### 2. **app.js** Integration Points
+
 - `simulateStep()`: Calls `Topo3D.simulateStep(SIM.step)` after dashboard update
 - `trySSEConnection()`: Hooks `data.topology_3d` → `Topo3D.update()`
 - `resetSimulation()`: Calls `Topo3D.simulateStep(0)` to reset
 
 #### 3. **index.html** Structure
+
 ```html
 <!-- Script loading with Three.js importmap -->
 <script type="importmap">
-  { "imports": {
+  {
+    "imports": {
       "three": "https://unpkg.com/three@0.168.0/build/three.module.js",
       "three/addons/": "https://unpkg.com/three@0.168.0/examples/jsm/"
     }
@@ -85,10 +89,18 @@ Main visualization engine with Three.js integration.
 
 <!-- Tab Navigation -->
 <div class="topo3d-tabs">
-  <button data-field="landscape" onclick="switchTopoField('landscape')">Landscape</button>
-  <button data-field="attention" onclick="switchTopoField('attention')">Attention</button>
-  <button data-field="expert" onclick="switchTopoField('expert')">Expert</button>
-  <button data-field="residual" onclick="switchTopoField('residual')">Residual</button>
+  <button data-field="landscape" onclick="switchTopoField('landscape')">
+    Landscape
+  </button>
+  <button data-field="attention" onclick="switchTopoField('attention')">
+    Attention
+  </button>
+  <button data-field="expert" onclick="switchTopoField('expert')">
+    Expert
+  </button>
+  <button data-field="residual" onclick="switchTopoField('residual')">
+    Residual
+  </button>
   <button data-field="chain" onclick="switchTopoField('chain')">Chain</button>
 </div>
 ```
@@ -98,6 +110,7 @@ Main visualization engine with Three.js integration.
 ## Field Renderers (5 Types)
 
 ### Field 1: Landscape Curvature Surface
+
 **Purpose**: Visualize condition number landscape and saddle detection across layers.
 
 ```
@@ -109,6 +122,7 @@ Legend: Convex Bowl | Narrow Ravine | Saddle Point | Wireframe
 ```
 
 **Data Schema** from `data.landscape_field`:
+
 ```javascript
 {
   kappa_grid: [[κ_00, κ_01, ...], [κ_10, ...], ...],     // μ×w grid
@@ -121,6 +135,7 @@ Legend: Convex Bowl | Narrow Ravine | Saddle Point | Wireframe
 ---
 
 ### Field 2: Attention Topology Volume
+
 **Purpose**: Display attention head specialization by projecting Q/K/V masks into 3D space.
 
 ```
@@ -132,6 +147,7 @@ Legend: Local Head | Global Head | Causal Head | Sink Head
 ```
 
 **Data Schema** from `data.attention_field`:
+
 ```javascript
 {
   masks_summary: {
@@ -152,6 +168,7 @@ Legend: Local Head | Global Head | Causal Head | Sink Head
 ---
 
 ### Field 3: Expert Routing Network
+
 **Purpose**: Visualize mixture-of-experts load distribution and co-activation patterns.
 
 ```
@@ -164,6 +181,7 @@ Legend: Active Expert | Stale Expert | Co-activation Edge
 ```
 
 **Data Schema** from `data.expert_field`:
+
 ```javascript
 {
   nodes: [
@@ -182,6 +200,7 @@ Legend: Active Expert | Stale Expert | Co-activation Edge
 ---
 
 ### Field 4: Residual Coupling Landscape
+
 **Purpose**: Show Jacobian matrix coupling strength between layers and highlight strongly coupled zones.
 
 ```
@@ -194,6 +213,7 @@ Legend: Decoupled | Strongly Coupled | Coupled Zone Marker
 ```
 
 **Data Schema** from `data.residual_field`:
+
 ```javascript
 {
   jacobian_matrix: [
@@ -210,6 +230,7 @@ Legend: Decoupled | Strongly Coupled | Coupled Zone Marker
 ---
 
 ### Field 5: Reasoning Chain Timeline
+
 **Purpose**: Visualize gradient trajectory through reasoning phases with pivot markers for important decision points.
 
 ```
@@ -223,6 +244,7 @@ Legend: Reasoning | Answer | Verify | Pivot Event
 ```
 
 **Data Schema** from `data.chain_field`:
+
 ```javascript
 {
   grad_norms: [0.5, 0.48, 0.52, ..., 0.02],              // Gradient norm trajectory
@@ -238,6 +260,7 @@ Legend: Reasoning | Answer | Verify | Pivot Event
 ## Data Flow: Two Modes
 
 ### Mode 1: Standalone Simulation (Default)
+
 ```
 │ Browser Loads
 ├─ index.html
@@ -263,6 +286,7 @@ Legend: Reasoning | Answer | Verify | Pivot Event
 ```
 
 ### Mode 2: Live SSE Connection (Connected to Server)
+
 ```
 │ Python Server Running (port 7860)
 │  └─ da_lbfgs.dashboard.server.DashboardServer
@@ -290,13 +314,13 @@ Legend: Reasoning | Answer | Verify | Pivot Event
 
 ## Camera Presets & Field-Specific Layouts
 
-| Field | Camera Pos | Target | Description |
-|-------|-----------|--------|-------------|
-| landscape | [6, 5, 8] | [0, 1, 0] | Elevated isometric view of curvature surface |
-| attention | [5, 6, 5] | [0, 2, 0] | Overhead view of head plane grid |
-| expert | [7, 4, 7] | [0, 2, 0] | Elevated circular expert layout |
-| residual | [5, 5, 7] | [0, 1, 0] | Isometric coupling surface |
-| chain | [8, 3, 4] | [0, 2, 0] | Side-front view of gradient trajectory tube |
+| Field     | Camera Pos | Target    | Description                                  |
+| --------- | ---------- | --------- | -------------------------------------------- |
+| landscape | [6, 5, 8]  | [0, 1, 0] | Elevated isometric view of curvature surface |
+| attention | [5, 6, 5]  | [0, 2, 0] | Overhead view of head plane grid             |
+| expert    | [7, 4, 7]  | [0, 2, 0] | Elevated circular expert layout              |
+| residual  | [5, 5, 7]  | [0, 1, 0] | Isometric coupling surface                   |
+| chain     | [8, 3, 4]  | [0, 2, 0] | Side-front view of gradient trajectory tube  |
 
 ---
 
@@ -304,17 +328,17 @@ Legend: Reasoning | Answer | Verify | Pivot Event
 
 ```javascript
 const C = {
-  bg:       0x09090b,    // Dark background
-  grid:     0x222228,    // Grid lines
-  accent1:  0x6366f1,    // Indigo (primary)
-  accent2:  0xa855f7,    // Purple (secondary)
-  accent3:  0xec4899,    // Pink (tertiary)
-  green:    0x22c55e,    // Green (positive)
-  amber:    0xf59e0b,    // Amber (warning)
-  red:      0xef4444,    // Red (alert)
-  teal:     0x14b8a6,    // Teal (info)
-  blue:     0x3b82f6,    // Blue (secondary)
-  white:    0xfafafa,    // Text
+  bg: 0x09090b, // Dark background
+  grid: 0x222228, // Grid lines
+  accent1: 0x6366f1, // Indigo (primary)
+  accent2: 0xa855f7, // Purple (secondary)
+  accent3: 0xec4899, // Pink (tertiary)
+  green: 0x22c55e, // Green (positive)
+  amber: 0xf59e0b, // Amber (warning)
+  red: 0xef4444, // Red (alert)
+  teal: 0x14b8a6, // Teal (info)
+  blue: 0x3b82f6, // Blue (secondary)
+  white: 0xfafafa, // Text
 };
 ```
 
@@ -323,12 +347,13 @@ const C = {
 ## Animation System
 
 ### Per-Frame Animations
+
 All field objects animate in `animate()` loop:
 
 ```javascript
 animateFieldObjects(activeField, t) {
   // t = performance.now() * 0.001 (seconds)
-  
+
   if (field === 'landscape') {
     // Evasion particles: rise, shrink, fade
     evasionParticles.forEach(p => {
@@ -337,7 +362,7 @@ animateFieldObjects(activeField, t) {
       p.scale.multiplyScalar(0.995);
     });
   }
-  
+
   if (field === 'expert') {
     // Active expert nodes: pulsing scale
     nodes.forEach((node, i) => {
@@ -347,7 +372,7 @@ animateFieldObjects(activeField, t) {
       }
     });
   }
-  
+
   if (field === 'chain') {
     // Flow animation via shader uniform
     ribbon.material.uniforms.time.value = t;
@@ -356,6 +381,7 @@ animateFieldObjects(activeField, t) {
 ```
 
 ### Control Flow
+
 ```
 requestAnimationFrame(animate)
 ├─ controls.update() (OrbitControls)
@@ -369,6 +395,7 @@ requestAnimationFrame(animate)
 ## Usage Examples
 
 ### Starting Standalone Simulation
+
 ```html
 <!-- Button in dashboard section -->
 <button onclick="startSimulation()">Start Simulation</button>
@@ -379,12 +406,13 @@ requestAnimationFrame(animate)
 function startSimulation() {
   SIM.running = true;
   SIM.interval = setInterval(() => {
-    simulateStep();  // → Topo3D.simulateStep(SIM.step)
+    simulateStep(); // → Topo3D.simulateStep(SIM.step)
   }, 300);
 }
 ```
 
 ### Switching Between Fields
+
 ```html
 <!-- Tabs in topology-3d section -->
 <button onclick="switchTopoField('landscape')">Landscape</button>
@@ -394,19 +422,19 @@ function startSimulation() {
 
 ```javascript
 // Tab control (topology3d.js)
-window.switchTopoField = function(field) {
+window.switchTopoField = function (field) {
   activeField = field;
-  
+
   // Update UI tabs
-  document.querySelectorAll('.topo3d-tab').forEach(tab => {
-    tab.classList.toggle('active', tab.dataset.field === field);
+  document.querySelectorAll(".topo3d-tab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.field === field);
   });
-  
+
   // Reset camera to preset
   const preset = cameraPresets[field];
   camera.position.set(...preset.pos);
   controls.target.set(...preset.target);
-  
+
   // Update legend & overlay
   updateLegend(field);
   updateInfoOverlay(field);
@@ -414,6 +442,7 @@ window.switchTopoField = function(field) {
 ```
 
 ### Connecting to Live Server (Manual Testing)
+
 ```python
 # Terminal 1: Start server
 python -c "
@@ -437,18 +466,22 @@ python optimize_model.py --dashboard
 ## Debugging & Troubleshooting
 
 ### Issue: White/blank canvas
+
 - **Check**: `topo3dContainer` has CSS width/height
 - **Fix**: Ensure `resize()` function runs after init()
 
 ### Issue: Fields not responding to "Start Simulation"
+
 - **Check**: `window.Topo3D` is defined (console: `typeof window.Topo3D`)
 - **Fix**: Ensure `topology3d.js` loads without errors (dev console → Sources)
 
 ### Issue: 3D visualization jumpy/laggy
+
 - **Reason**: Too many particles or overdraw
 - **Fix**: Reduce evasion particle pool size or use object pooling
 
 ### Issue: SSE not connecting in live mode
+
 - **Check**: Server running on `http://127.0.0.1:7860`
 - **Fix**: Browser console should show "Connected" not "Standalone"
 - **Alternative**: Works fine in standalone mode without server
@@ -457,13 +490,13 @@ python optimize_model.py --dashboard
 
 ## Performance Characteristics
 
-| Field | Polygons | Vertices | Textures | Overhead |
-|-------|----------|----------|----------|----------|
-| Landscape | ~1k | ~1k | 0 | Low (vertex colors) |
-| Attention | ~100/head × 16 | ~64/head × 16 | 0 | Med (many planes) |
-| Expert | 8 spheres | 128 each | 0 | Low (simple spheres) |
-| Residual | ~256 | ~256 | 0 | Low (vertex colors) |
-| Chain | ~400 points | ~2k | 0 | Med (tube subdivisions) |
+| Field     | Polygons       | Vertices      | Textures | Overhead                |
+| --------- | -------------- | ------------- | -------- | ----------------------- |
+| Landscape | ~1k            | ~1k           | 0        | Low (vertex colors)     |
+| Attention | ~100/head × 16 | ~64/head × 16 | 0        | Med (many planes)       |
+| Expert    | 8 spheres      | 128 each      | 0        | Low (simple spheres)    |
+| Residual  | ~256           | ~256          | 0        | Low (vertex colors)     |
+| Chain     | ~400 points    | ~2k           | 0        | Med (tube subdivisions) |
 
 **Total**: ~10-15k triangles per frame, 60 FPS on modern hardware.
 
@@ -486,4 +519,3 @@ python optimize_model.py --dashboard
 3. **Neural Network Graph**: Layer connectivity visualization
 4. **Performance Metrics**: Real-time FPS, memory, latency overlays
 5. **Recording/Export**: Capture 3D trajectory as MP4 or WebGL buffer
-

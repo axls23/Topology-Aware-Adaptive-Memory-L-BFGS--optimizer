@@ -33,13 +33,13 @@
     </div>
     <div class="topnav-right">
       <div class="status-indicator" id="connStatus">
-        <span class="status-dot offline"></span>
-        <span class="status-text">Offline</span>
+        <span class="status-dot standalone"></span>
+        <span class="status-text">Standalone</span>
       </div>
-      <button class="btn-run" id="btnRun" onclick="window.open('http://127.0.0.1:7860','_blank')">
+      <a href="#dashboard" class="btn-run" id="btnRun">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
         Live Dashboard
-      </button>
+      </a>
     </div>
   </nav>
 
@@ -336,8 +336,8 @@
         <tbody>
           <tr class="bench-highlight"><td>ta-LBFGS</td><td>0.0034</td><td>18</td><td>3/3 ✓</td><td>3–20 (adaptive)</td><td>★★★★★</td></tr>
           <tr><td>L-BFGS (fixed m=10)</td><td>0.0089</td><td>32</td><td>1/3</td><td>10 (fixed)</td><td>★★★☆☆</td></tr>
-          <tr><td>Adam (lr=1e-3)</td><td>0.0156</td><td>45</td><td>2/3</td><td>N/A</td><td>★★★★☆</td></tr>
-          <tr><td>SGD (lr=0.1)</td><td>0.0412</td><td>78</td><td>0/3</td><td>N/A</td><td>★★★★☆</td></tr>
+          <tr><td>Adam (lr=1e-3)</td><td>0.0156</td><td>45</td><td>2/3</td><td>2× per param (m, v)</td><td>★★★★☆</td></tr>
+          <tr><td>SGD (lr=0.1)</td><td>0.0412</td><td>78</td><td>0/3</td><td>1× momentum buf</td><td>★★★★☆</td></tr>
         </tbody>
       </table>
     </div>

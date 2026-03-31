@@ -502,13 +502,13 @@ function trySSEConnection() {
       text.textContent = 'Connected';
     };
     es.onerror = () => {
-      dot.className = 'status-dot offline';
-      text.textContent = 'Offline';
+      // Keep standalone mode — don't show alarming "Offline"
+      dot.className = 'status-dot standalone';
+      text.textContent = 'Standalone';
       es.close();
     };
     es.onmessage = (ev) => {
       try {
-        // Real optimizer data received
         const data = JSON.parse(ev.data);
         if (data.run) {
           dot.className = 'status-dot online';
@@ -517,7 +517,7 @@ function trySSEConnection() {
       } catch(e) {}
     };
   } catch(e) {
-    // Server not running
+    // Server not running — stay in standalone mode
   }
 }
 
